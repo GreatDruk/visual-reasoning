@@ -6,6 +6,5 @@ __*__
 .*cache
 *.egg-info
 catboost_info
-CLAUDE.md
 .DS_Store
 submissions/
