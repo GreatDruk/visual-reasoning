@@ -1,0 +1,8 @@
+# Лёгкий вариант для быстрых прогонов и бейзлайна из лабы.
+_target_: src.models.image_encoders.TorchvisionEncoder
+arch: resnet18
+weights: IMAGENET1K_V1
+out_layer: layer3               # 256 каналов
+spatial: true
+freeze: true
+unfreeze_last_n_blocks: 0

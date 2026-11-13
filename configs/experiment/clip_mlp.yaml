@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - override /model/image_encoder: clip_vit_b32
+  - override /model/text_encoder: clip_text
+  - override /model/fusion: mlp
+  - override /loss: bce_pair
+
+data:
+  normalize: clip
+  image_size: [224, 224]

@@ -1,0 +1,5 @@
+# Текстовая башня CLIP; использовать в паре с clip_vit_b32.
+_target_: src.models.text_encoders.ClipTextEncoder
+model_name: ViT-B-32
+pretrained: openai
+freeze: true

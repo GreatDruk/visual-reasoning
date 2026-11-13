@@ -1,0 +1,13 @@
+# @package _global_
+# Финальный рефит на train+val с лучшей конфигурацией (поменять после экспериментов).
+defaults:
+  - override /model/fusion: film
+  - override /loss: bce_pair
+
+data:
+  train_on_val: true
+train:
+  early_stopping: null          # val в обучении -> фиксированное число эпох из CV
+  epochs: 15
+  postprocess:
+    twin_normalize: true

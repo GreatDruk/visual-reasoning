@@ -1,0 +1,21 @@
+epochs: 20
+batch_size: 128
+pair_sampler: true              # оба близнеца в одном батче (нужно для pair loss)
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+amp: true
+grad_clip: 1.0
+early_stopping:
+  monitor: val_auc
+  patience: 4
+time_budget_min: 45             # лимит 50 мин на Kaggle GPU, оставляем запас на инференс
+cache_features: true            # при замороженном энкодере считать фичи один раз
+eval:
+  metrics: [auc, accuracy, pair_accuracy, auc_per_category]
+postprocess:
+  twin_normalize: false         # softmax внутри найденных пар близнецов в test

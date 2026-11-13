@@ -1,0 +1,11 @@
+data/
+artefacts/
+uv.lock
+__*__
+.venv
+.*cache
+*.egg-info
+catboost_info
+CLAUDE.md
+.DS_Store
+submissions/

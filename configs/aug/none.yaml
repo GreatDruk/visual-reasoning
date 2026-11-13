@@ -1,0 +1,12 @@
+image:
+  hflip_swap_lr: 0.0
+  brightness: 0.0
+  contrast: 0.0
+  gaussian_blur_p: 0.0
+  gaussian_noise_std: 0.0
+text:
+  reorder_clauses_p: 0.0
+  logical_negatives:
+    enabled: false
+    ratio: 0.0
+    rules: []

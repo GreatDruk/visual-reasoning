@@ -1,0 +1,19 @@
+# @package _global_
+# Запуск: python -m src.train -m tune=optuna [experiment=...]
+# Нужен пакет hydra-optuna-sweeper; train должен возвращать val AUC.
+defaults:
+  - override /hydra/sweeper: optuna
+
+hydra:
+  sweeper:
+    direction: maximize
+    study_name: ${hydra:job.name}
+    n_trials: 30
+    n_jobs: 1
+    sampler:
+      seed: ${seed}
+    params:
+      train.optimizer.lr: tag(log, interval(1.0e-5, 1.0e-3))
+      train.optimizer.weight_decay: tag(log, interval(1.0e-6, 1.0e-2))
+      loss.pair_weight: interval(0.0, 1.0)
+      aug.text.reorder_clauses_p: interval(0.0, 0.5)

@@ -1,0 +1,3 @@
+_target_: src.losses.TruthLoss
+pair_weight: 0.0
+label_smoothing: 0.0

@@ -1,0 +1,12 @@
+# @package _global_
+# Бейзлайн из лабы: два энкодера + scale*cos + bias. Для чекпоинта: только train.
+defaults:
+  - override /model/image_encoder: resnet18
+  - override /model/text_encoder: gru
+  - override /model/fusion: cosine
+  - override /loss: bce
+  - override /aug: none
+
+model:
+  image_encoder:
+    spatial: false

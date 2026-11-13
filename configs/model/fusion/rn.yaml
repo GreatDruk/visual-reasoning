@@ -1,0 +1,10 @@
+# Relation Network: пары ячеек feature map + координаты + текст.
+_target_: src.models.fusion.RelationHead
+pool_to: [8, 12]                # 96 ячеек -> 9216 пар; полная карта 20x30 слишком дорогая
+coord_channels: true
+g_hidden: 256
+g_layers: 4
+f_hidden: 256
+f_layers: 2
+dropout: 0.1
+requires_spatial: true

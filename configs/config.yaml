@@ -1,0 +1,32 @@
+# Корневой конфиг. Компонуется из групп ниже; любую можно переопределить из CLI:
+#   python -m src.train model/fusion=mac model/image_encoder=convnext_tiny
+#   python -m src.train experiment=film_rn
+#   python -m src.train -m model/fusion=film,mac loss=bce,bce_pair     # multirun
+defaults:
+  - data: default
+  - model/image_encoder: resnet101
+  - model/text_encoder: gru
+  - model/fusion: film
+  - loss: bce_pair
+  - aug: default
+  - train: default
+  - tune: none
+  - _self_
+  - optional experiment: null   # пресет поверх всего остального
+
+seed: 42
+device: cuda
+
+paths:
+  data_dir: data                # относительные пути: требование правил
+  output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  submission: final_submission.csv
+
+hydra:
+  job:
+    chdir: false                # не менять cwd, иначе ломаются относительные пути
+  run:
+    dir: ${paths.output_dir}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}

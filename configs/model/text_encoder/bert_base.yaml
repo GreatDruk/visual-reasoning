@@ -1,0 +1,6 @@
+_target_: src.models.text_encoders.HFTextEncoder
+model_name: bert-base-uncased   # офлайн: путь к весам, подключённым как Kaggle input
+pooling: cls                    # cls | mean
+max_length: 32
+freeze: true
+unfreeze_last_n_layers: 0

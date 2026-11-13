@@ -1,0 +1,9 @@
+# MAC (Hudson & Manning, 2018): итеративные control/read/write шаги.
+_target_: src.models.fusion.MACHead
+dim: 512
+max_steps: 8
+self_attention: false
+memory_gate: false
+dropout: 0.15
+coord_channels: true
+requires_spatial: true

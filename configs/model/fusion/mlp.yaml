@@ -1,0 +1,6 @@
+# MLP над [i, t, i*t, |i-t|].
+_target_: src.models.fusion.ConcatMLPHead
+proj_dim: 512
+hidden_dims: [1024, 256]
+dropout: 0.2
+requires_spatial: false

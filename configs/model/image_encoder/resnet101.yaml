@@ -1,0 +1,8 @@
+# Как в FiLM/MAC: замороженный ResNet-101, выход conv4 (= layer3 в torchvision), stride 16.
+_target_: src.models.image_encoders.TorchvisionEncoder
+arch: resnet101
+weights: IMAGENET1K_V2
+out_layer: layer3               # 1024 канала
+spatial: true                   # отдаёт feature map [B, C, H, W]
+freeze: true
+unfreeze_last_n_blocks: 0

@@ -1,0 +1,13 @@
+image:
+  hflip_swap_lr: 0.5            # flip + замена left<->right в подписи (иначе метка неверна)
+  brightness: 0.1
+  contrast: 0.1
+  gaussian_blur_p: 0.1
+  gaussian_noise_std: 0.01
+  # vflip / rotation / hue jitter / crop запрещены или рискованны по правилам: не добавлять
+text:
+  reorder_clauses_p: 0.3        # перефраз с той же меткой (hard positives)
+  logical_negatives:            # новые ложные подписи с гарантированной меткой
+    enabled: true
+    ratio: 0.25                 # доля от батча
+    rules: [count_shift, left_right]
