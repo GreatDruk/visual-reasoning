@@ -1,0 +1,10 @@
+# ResNet-50 layer3 (= conv4), 1024 channels, stride 16: same shape as ResNet-101 conv4.
+# Used instead of resnet101 because the ResNet-101 weights could not be downloaded
+# on the dev machine (no network); ResNet-50 V2 weights are in the local torch cache.
+_target_: src.models.image_encoders.TorchvisionEncoder
+arch: resnet50
+weights: IMAGENET1K_V2
+out_layer: layer3               # 1024 канала
+spatial: true
+freeze: true
+unfreeze_last_n_blocks: 0

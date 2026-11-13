@@ -4,7 +4,7 @@
 #   python -m src.train -m model/fusion=film,mac loss=bce,bce_pair     # multirun
 defaults:
   - data: default
-  - model/image_encoder: resnet101
+  - model/image_encoder: resnet50   # resnet101: веса недоступны офлайн на dev-машине
   - model/text_encoder: gru
   - model/fusion: film
   - loss: bce_pair
@@ -15,11 +15,15 @@ defaults:
   - optional experiment: null   # пресет поверх всего остального
 
 seed: 42
-device: cuda
+device: auto                    # auto: cuda -> mps -> cpu
+name_exp: debug                 # 00X_<name> для основных прогонов
+archive: false                  # true: сохранить конфиг в configs/archive/<name_exp>.yaml
 
 paths:
   data_dir: data                # относительные пути: требование правил
-  output_dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  output_dir: artefacts/hydra/${name_exp}/${now:%Y-%m-%d_%H-%M-%S}
+  features_dir: artefacts/features
+  submissions_dir: submissions
   submission: final_submission.csv
 
 hydra:
@@ -28,5 +32,5 @@ hydra:
   run:
     dir: ${paths.output_dir}
   sweep:
-    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: artefacts/hydra/multirun/${name_exp}/${now:%Y-%m-%d_%H-%M-%S}
     subdir: ${hydra.job.num}
