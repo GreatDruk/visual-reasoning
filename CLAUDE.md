@@ -61,8 +61,3 @@ Contracts implied by the configs that implementation must respect:
 - Experiments: global three-digit id `00X_<name>`, never reused even for failed runs.
 - Every main experiment run (one that goes into the Solution table) saves its full composed config to `configs/archive/00X_<name>.yaml`. The archive is append-only; never edit existing files there. Debug runs are not archived.
 - Report both val AUC and val accuracy (Moodle table asks for accuracy, metric is AUC), plus pair accuracy and per-category AUC.
-
-## Gotchas
-
-- `.gitignore` entry `data/` also matches `configs/data/`, so `configs/data/default.yaml` is untracked. Use `/data/` to ignore only the root data folder.
-- `CLAUDE.md` itself is gitignored.

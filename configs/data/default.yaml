@@ -1,0 +1,19 @@
+train_csv: ${paths.data_dir}/train.csv
+val_csv: ${paths.data_dir}/val.csv
+test_csv: ${paths.data_dir}/test.csv
+sample_submission: ${paths.data_dir}/sample_submission.csv
+train_images: ${paths.data_dir}/train
+val_images: ${paths.data_dir}/val
+test_images: ${paths.data_dir}/test
+
+submission_target_col: label    # так в sample_submission.csv (в rules написано target)
+
+# false: чекпоинт и все эксперименты (train -> val). true: финальный рефит на train+val.
+train_on_val: false
+
+image_size: [320, 480]          # [H, W]; оригинал 160x240, x2 -> сетка 20x30 на stride 16
+normalize: imagenet             # imagenet | clip; должен совпадать с энкодером
+cache_images: true              # 6k картинок 160x240 целиком помещаются в RAM
+
+num_workers: 4
+pin_memory: true
