@@ -31,6 +31,12 @@ class Split:
 def load_split(name, csv_path):
     """Read a csv; images are numbered in order of first appearance."""
     df = pl.read_csv(resolve_path(csv_path))
+    if "label" in df.columns:
+        if "pair_id" not in df.columns:
+            raise ValueError(f"{name}: labelled rows require pair_id")
+        for key, pair in df.group_by("pair_id", maintain_order=True):
+            if pair.height != 2 or pair["image"].n_unique() != 1 or set(pair["label"].to_list()) != {0, 1} or key[0] is None:
+                raise ValueError(f"{name}: invalid labelled pair {key[0]!r}: expected two rows, one image, labels {{0, 1}}")
     image_names = df["image"].unique(maintain_order=True).to_list()
     pos = {n: i for i, n in enumerate(image_names)}
     return Split(
@@ -46,14 +52,18 @@ def load_split(name, csv_path):
 
 
 def subset(split, mask):
-    """Rows of a split selected by a boolean mask (image indexing is unchanged)."""
+    """Select rows; compact image indexing only before attaching an image source."""
     rows = np.nonzero(mask)[0]
     pick = lambda v: None if v is None else v[rows]
+    image_names, img_idx = split.image_names, split.img_idx[rows]
+    if split.source is None:
+        used, img_idx = np.unique(img_idx, return_inverse=True)
+        image_names = [split.image_names[i] for i in used]
     return Split(
         name=split.name,
         ids=split.ids[rows],
-        image_names=split.image_names,
-        img_idx=split.img_idx[rows],
+        image_names=image_names,
+        img_idx=img_idx,
         captions=[split.captions[r] for r in rows],
         categories=split.categories[rows],
         labels=pick(split.labels),
@@ -63,7 +73,7 @@ def subset(split, mask):
 
 
 def paraphrased(split, name=None):
-    """Copy of a split with every caption rewritten into a form unseen in train/val."""
+    """Rule-based paraphrasing diagnostic; shares rules with training augmentation."""
     captions = [novel_form(c, cat) for c, cat in zip(split.captions, split.categories)]
     return Split(**{**split.__dict__, "name": name or f"{split.name}_para", "captions": captions})
 
@@ -131,8 +141,36 @@ def pair_groups(split):
     """Row indices grouped by pair_id: array [P, 2]."""
     order = np.argsort(split.pair_ids, kind="stable")
     rows = order.reshape(-1, 2)
-    assert (split.pair_ids[rows[:, 0]] == split.pair_ids[rows[:, 1]]).all()
     return rows
+
+
+def sample_pairs_by_category(split, pairs_per_category, seed):
+    """Choose complete, category-balanced pairs before attaching image sources."""
+    if (isinstance(pairs_per_category, (bool, np.bool_))
+            or not isinstance(pairs_per_category, (int, np.integer)) or pairs_per_category <= 0):
+        raise ValueError(f"{split.name}: pairs_per_category must be a positive integer")
+    if split.labels is None or split.pair_ids is None:
+        raise ValueError(f"{split.name}: labels and pair_ids are required")
+    _, counts = np.unique(split.pair_ids, return_counts=True)
+    if not np.all(counts == 2):
+        raise ValueError(f"{split.name}: expected complete pairs")
+    groups = pair_groups(split)
+    categories = split.categories[groups]
+    mixed = categories[:, 0] != categories[:, 1]
+    if mixed.any():
+        pair_id = split.pair_ids[groups[np.flatnonzero(mixed)[0], 0]]
+        raise ValueError(f"{split.name}: mixed categories in pair_id {pair_id}")
+    rng = np.random.default_rng(seed)
+    mask = np.zeros(len(split), dtype=bool)
+    for category in sorted(set(categories[:, 0])):
+        available = groups[categories[:, 0] == category]
+        if len(available) < pairs_per_category:
+            raise ValueError(
+                f"{split.name}: category {category}: requested {pairs_per_category}, available {len(available)}"
+            )
+        selected = rng.choice(len(available), size=pairs_per_category, replace=False)
+        mask[available[selected].reshape(-1)] = True
+    return subset(split, mask)
 
 
 def train_batches(split, batch_size, rng, aug, pair_sampler=True):

@@ -42,9 +42,13 @@ def preprocess(images_u8, size, normalize, flip=False):
 
 
 def cache_key(encoder_cfg, data_cfg):
+    """Identity of a frozen-feature cache: arch, literal weights (None != V1 != V2),
+    out layer, input size, normalisation. The `eval-v2_` prefix keeps these correctly
+    extracted eval-mode features apart from older caches (whose keys lacked the prefix
+    and collapsed the weights identity)."""
     h, w = data_cfg.image_size
-    weights = "" if encoder_cfg.weights in ("IMAGENET1K_V1", None) or encoder_cfg.arch == "resnet18" else f"_{encoder_cfg.weights.lower()}"
-    return f"{encoder_cfg.arch}{weights}_{encoder_cfg.out_layer}_{h}x{w}_{data_cfg.normalize}"
+    weights = "none" if encoder_cfg.weights is None else str(encoder_cfg.weights)
+    return f"eval-v2_{encoder_cfg.arch}_{weights}_{encoder_cfg.out_layer}_{h}x{w}_{data_cfg.normalize}"
 
 
 @torch.no_grad()

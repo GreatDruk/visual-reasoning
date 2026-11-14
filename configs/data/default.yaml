@@ -14,3 +14,4 @@ train_on_val: false
 image_size: [160, 240]          # [H, W]; нативное разрешение -> сетка 10x15 на stride 16 (320x480 -> 20x30)
 normalize: imagenet             # imagenet | clip; должен совпадать с энкодером
 limit: null                     # отладка: взять первые N подписей train/val
+train_pairs_per_category: null   # train-only diagnostic: complete pairs per category

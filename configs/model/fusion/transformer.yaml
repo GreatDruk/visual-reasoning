@@ -1,0 +1,11 @@
+# Совместный self-attention по [CLS] + словам + ячейкам карты (с 2D позиционными эмбеддингами).
+# Своя голова (разрешено правилами: fusion/attention layers trained on contest data).
+_target_: src.models.fusion.TransformerHead
+dim: 256
+num_layers: 4
+num_heads: 8
+ff_dim: 512
+dropout: 0.1
+max_cells: [20, 30]
+requires_spatial: true
+readout: cosine                 # cosine | bilinear_mlp | mlp (cosine: ограниченный логит, меньше запоминания)

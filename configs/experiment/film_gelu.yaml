@@ -1,0 +1,10 @@
+# @package _global_
+# Однофакторный кандидат относительно film_finetune: GELU только в MLP readout.
+# Не подтверждённый фикс коллапса; ResNet, FiLM conv-блоки, LR и dropout не меняются.
+defaults:
+  - film_finetune
+  - _self_
+
+model:
+  fusion:
+    readout_activation: gelu

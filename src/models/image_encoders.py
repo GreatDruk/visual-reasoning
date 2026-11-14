@@ -28,6 +28,9 @@ class TorchvisionEncoder(nn.Module):
         self.spatial = spatial
         self.freeze = freeze
         self.arch, self.out_layer = arch, out_layer
+        # Probe the output channels in eval mode: the dummy forward must not update
+        # BatchNorm running stats of a backbone whose features will be cached.
+        self.body.eval()
         with torch.no_grad():
             self.out_channels = self.body(torch.zeros(1, 3, 64, 64))["out"].shape[1]
         if freeze:
@@ -38,6 +41,8 @@ class TorchvisionEncoder(nn.Module):
                 for block in list(stage.children())[-unfreeze_last_n_blocks:]:
                     for p in block.parameters():
                         p.requires_grad_(True)
+        else:
+            self.body.train()
         self.trainable = (not freeze) or unfreeze_last_n_blocks > 0
 
     def train(self, mode=True):

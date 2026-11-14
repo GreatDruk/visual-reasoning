@@ -23,15 +23,19 @@ def collect(include_all=False):
 
 
 def table(rows):
-    head = "| ID | val AUC | val acc | pair acc | val_para AUC | twin-norm AUC | epochs | min | " + " | ".join(CATS) + " |"
-    lines = [head, "|" + "---|" * (8 + len(CATS))]
+    columns = ["ID", "architecture", "seed", "val AUC", "val acc", "pair acc", "val_para AUC", "epochs", "fit min", "total min", *CATS]
+    lines = ["| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)]
     for _, r in rows:
         v = r["val"]
-        cats = " | ".join(f"{v.get(f'auc/{c}', float('nan')):.3f}" for c in CATS)
-        lines.append(
-            f"| {r['name_exp']} | {v['auc']:.4f} | {v['accuracy']:.4f} | {v['pair_accuracy']:.4f} | "
-            f"{r['val_para']['auc']:.4f} | {r['val_twin_norm']['auc']:.4f} | {r['epochs_run']} | {r['total_min']} | {cats} |"
-        )
+        fmt = lambda value, digits=4: "—" if value is None else f"{value:.{digits}f}"
+        values = [
+            r["name_exp"], r.get("architecture", "—"), str(r.get("seed", "—")),
+            fmt(v.get("auc")), fmt(v.get("accuracy")), fmt(v.get("pair_accuracy")),
+            fmt(r.get("val_para", {}).get("auc")), str(r.get("epochs_run", "—")),
+            fmt(r.get("fit_min"), 2), fmt(r.get("total_min"), 2),
+            *(fmt(v.get(f"auc/{c}"), 3) for c in CATS),
+        ]
+        lines.append("| " + " | ".join(values) + " |")
     return "\n".join(lines)
 
 

@@ -1,0 +1,12 @@
+# @package _global_
+# Этап C матрицы: обучаемое взаимодействие пулинговых векторов [i, t, i*t, |i-t|].
+defaults:
+  - override /model/image_encoder: resnet50
+  - override /model/text_encoder: gru
+  - override /model/fusion: mlp
+  - override /loss: bce
+  - override /aug: none
+
+model:
+  image_encoder:
+    spatial: false              # MLP работает с пулинговым вектором

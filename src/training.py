@@ -32,7 +32,35 @@ class Trainer:
         self.image_size = image_size
         self.normalize = normalize
         self.rng = np.random.default_rng(seed)
-        self.amp_dtype = torch.bfloat16 if train_cfg.amp else None
+        # One AMP decision per Trainer: amp off or CPU/MPS -> float32; CUDA bf16 when
+        # supported, otherwise fp16 with a GradScaler (its skips must not step the LR schedule).
+        self.amp_dtype = None
+        self.scaler = None
+        if train_cfg.amp and device.type == "cuda":
+            if torch.cuda.is_bf16_supported():
+                self.amp_dtype = torch.bfloat16
+            else:
+                self.amp_dtype = torch.float16
+                self.scaler = torch.amp.GradScaler("cuda")
+        self.best_epoch = None
+        self.stop_reason = "epochs"
+
+    def _make_optimizer(self):
+        """Partition trainable tensors by encoder identity, without duplicate ownership."""
+        encoder = self.model.image_encoder
+        image_ids = {id(p) for p in encoder.parameters()} if encoder is not None else set()
+        image, task = [], []
+        for p in self.model.parameters():
+            if p.requires_grad:
+                (image if id(p) in image_ids else task).append(p)
+        cfg = self.cfg.optimizer
+        image_lr = cfg.get("image_encoder_lr")
+        groups = []
+        if image:
+            groups.append({"name": "image_encoder", "params": image, "lr": cfg.lr if image_lr is None else image_lr})
+        if task:
+            groups.append({"name": "task", "params": task, "lr": cfg.lr})
+        return torch.optim.AdamW(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     def _inputs(self, split, batch):
         x = split.source.get(batch["img_idx"], batch["flip"]).to(self.device, non_blocking=True)
@@ -49,8 +77,10 @@ class Trainer:
             return self.model(x, tokens, lengths).float()
 
     @torch.no_grad()
-    def predict(self, split, batch_size=512):
-        """Raw logits for every row of a split."""
+    def predict(self, split, batch_size=None):
+        """Raw logits for every row of a split; `batch_size=None` uses `cfg.batch_size`."""
+        if batch_size is None:
+            batch_size = self.cfg.batch_size
         self.model.eval()
         out = [self._forward(split, b).cpu().numpy() for b in eval_batches(split, batch_size)]
         return np.concatenate(out)
@@ -64,11 +94,15 @@ class Trainer:
         """Train; after each epoch evaluate every split in eval_splits ({name: Split}).
 
         Keeps the weights of the best epoch by `monitor` (e.g. "val_auc"), or the last
-        epoch when early stopping is disabled. Returns the per-epoch history.
+        epoch when early stopping is disabled; the kept epoch is in `self.best_epoch`.
+        Returns the per-epoch history. If `time_budget_min` would cut a fixed-epoch
+        refit (`early_stopping=null`) short, raises instead of returning a partial fit.
         """
         cfg = self.cfg
         params = [p for p in self.model.parameters() if p.requires_grad]
-        opt = torch.optim.AdamW(params, lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
+        opt = self._make_optimizer()
+        for group in opt.param_groups:
+            log.info(f"optimizer {group['name']}: {sum(p.numel() for p in group['params'])} parameters, lr {group['lr']}")
         steps_per_epoch = math.ceil(len(train_split) / cfg.batch_size)
         total = steps_per_epoch * cfg.epochs
         warmup = steps_per_epoch * cfg.scheduler.get("warmup_epochs", 0)
@@ -99,35 +133,59 @@ class Trainer:
                     pair_index.to(self.device) if pair_index is not None else None,
                 )
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
+                if self.scaler is not None:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(opt)
+                else:
+                    loss.backward()
                 if cfg.grad_clip:
                     torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
-                opt.step()
-                sched.step()
+                if self.scaler is not None:
+                    scale_before = self.scaler.get_scale()
+                    self.scaler.step(opt)
+                    self.scaler.update()
+                    stepped = self.scaler.get_scale() >= scale_before  # scale shrinks on an inf-skip
+                else:
+                    opt.step()
+                    stepped = True
+                if stepped:
+                    sched.step()
                 losses.append(loss.item())
 
             row = {"epoch": epoch, "loss": float(np.mean(losses)), "epoch_sec": round(time.time() - t0, 1)}
+            row.update({f"lr/{g['name']}": g["lr"] for g in opt.param_groups})
             for name, split in eval_splits.items():
                 metrics, _ = self.evaluate(split)
-                row.update({f"{name}_{k}": v for k, v in metrics.items() if "/" not in k})
+                row.update({f"{name}_{k}": v for k, v in metrics.items()})
             history.append(row)
-            log.info(" | ".join(f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}" for k, v in row.items()))
+            log.info(" | ".join(f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
+                                for k, v in row.items() if "_auc/" not in k))
 
-            score = row.get(monitor, -row["loss"])
-            if score > best:
+            score = row[monitor] if es is not None else -row["loss"]
+            improved = score > best
+            if improved:
                 best, bad_epochs = score, 0
-                best_state = copy.deepcopy(self.model.state_dict())
             else:
                 bad_epochs += 1
-            if es is None:
+            if improved or es is None:
+                # Fixed-epoch refit keeps the last completed epoch; otherwise the best one.
+                self.best_epoch = epoch
                 best_state = copy.deepcopy(self.model.state_dict())
-            elif bad_epochs >= patience:
+            if es is not None and bad_epochs >= patience:
+                self.stop_reason = "early_stopping"
                 log.info(f"early stopping at epoch {epoch}, best {monitor} {best:.4f}")
                 break
-            elapsed_min = (time.time() - start) / 60
-            if cfg.time_budget_min and elapsed_min * (epoch + 1) / epoch > cfg.time_budget_min:
-                log.info(f"time budget reached after epoch {epoch} ({elapsed_min:.1f} min)")
-                break
+            if epoch < cfg.epochs:
+                elapsed_min = (time.time() - start) / 60
+                if cfg.time_budget_min and elapsed_min * (epoch + 1) / epoch > cfg.time_budget_min:
+                    self.stop_reason = "time_budget"
+                    if es is None:
+                        raise RuntimeError(
+                            f"time budget {cfg.time_budget_min} min would stop the fixed {cfg.epochs}-epoch "
+                            f"refit after epoch {epoch} ({elapsed_min:.1f} min elapsed); fit is incomplete"
+                        )
+                    log.info(f"time budget reached after epoch {epoch} ({elapsed_min:.1f} min)")
+                    break
 
         self.model.load_state_dict(best_state)
         return history

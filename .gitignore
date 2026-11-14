@@ -7,3 +7,5 @@ __*__
 catboost_info
 .DS_Store
 submissions/
+/final_submission.csv
+/resources/torch/

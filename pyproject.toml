@@ -5,6 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "hydra-core==1.4.0rc3",
     "hydra-optuna-sweeper==1.4.0rc3",
+    "ipykernel>=7.4.0",
     "marimo>=0.25.2",
     "matplotlib>=3.11.2",
     "polars>=2.1.0",
@@ -19,5 +20,5 @@ dependencies = [
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.setuptools.packages.find]
+include = ["src*"]

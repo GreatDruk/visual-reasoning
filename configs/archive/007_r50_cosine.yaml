@@ -1,0 +1,86 @@
+data:
+  train_csv: data/train.csv
+  val_csv: data/val.csv
+  test_csv: data/test.csv
+  sample_submission: data/sample_submission.csv
+  train_images: data/train
+  val_images: data/val
+  test_images: data/test
+  submission_target_col: label
+  train_on_val: false
+  image_size:
+  - 160
+  - 240
+  normalize: imagenet
+  limit: null
+model:
+  image_encoder:
+    _target_: src.models.image_encoders.TorchvisionEncoder
+    arch: resnet50
+    weights: IMAGENET1K_V2
+    out_layer: layer3
+    spatial: true
+    freeze: true
+    unfreeze_last_n_blocks: 0
+  text_encoder:
+    _target_: src.models.text_encoders.GRUEncoder
+    embed_dim: 200
+    hidden_dim: 256
+    num_layers: 1
+    bidirectional: true
+    dropout: 0.1
+    lowercase: true
+  fusion:
+    _target_: src.models.fusion.CosineHead
+    proj_dim: 256
+    init_scale: 10.0
+    init_bias: 0.0
+    requires_spatial: false
+  init_from: null
+loss:
+  _target_: src.losses.TruthLoss
+  pair_weight: 0.0
+  label_smoothing: 0.0
+aug:
+  image:
+    hflip_swap_lr: 0.0
+  text:
+    reorder_clauses_p: 0.0
+train:
+  epochs: 20
+  batch_size: 128
+  pair_sampler: true
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 0.0003
+    weight_decay: 0.0001
+  scheduler:
+    name: cosine
+    warmup_epochs: 1
+  amp: true
+  grad_clip: 1.0
+  early_stopping:
+    monitor: val_auc
+    patience: 4
+  time_budget_min: 45
+  cache_features: true
+  predict_test: false
+  eval:
+    metrics:
+    - auc
+    - accuracy
+    - pair_accuracy
+    - auc_per_category
+  postprocess:
+    twin_normalize: false
+tune: {}
+seed: 42
+device: auto
+name_exp: 007_r50_cosine
+save_config: true
+paths:
+  data_dir: data
+  output_dir: artefacts/hydra/007_r50_cosine/2026-11-14_15-47-13
+  features_dir: artefacts/features
+  submissions_dir: submissions
+  submission: submissions/007_r50_cosine.csv

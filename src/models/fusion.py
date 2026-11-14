@@ -6,6 +6,8 @@ tuple (sentence [B, D], token_states [B, L, D], mask [B, L]) from a text encoder
 `requires_spatial` tells the model whether the encoder must keep the spatial map.
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -23,12 +25,23 @@ def with_coords(x, enabled=True):
     return torch.cat([x, coord_map(x)], dim=1) if enabled else x
 
 
-def mlp(dims, dropout=0.0, last_act=False):
+def adaptive_pool(x, size):
+    """adaptive_avg_pool2d that also works on MPS for non-divisible sizes (via CPU)."""
+    size = tuple(size)
+    h, w = x.shape[-2:]
+    if x.device.type == "mps" and (h % size[0] or w % size[1]):
+        return F.adaptive_avg_pool2d(x.cpu(), size).to(x.device)
+    return F.adaptive_avg_pool2d(x, size)
+
+
+def mlp(dims, dropout=0.0, last_act=False, activation="relu"):
+    if activation not in ("relu", "gelu"):
+        raise ValueError(f"unsupported MLP activation {activation!r}; expected relu or gelu")
     layers = []
     for i, (a, b) in enumerate(zip(dims[:-1], dims[1:])):
         layers.append(nn.Linear(a, b))
         if i < len(dims) - 2 or last_act:
-            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.GELU() if activation == "gelu" else nn.ReLU(inplace=True))
             if dropout:
                 layers.append(nn.Dropout(dropout))
     return nn.Sequential(*layers)
@@ -68,6 +81,43 @@ class ConcatMLPHead(nn.Module):
         return self.mlp(torch.cat([i, t, i * t, (i - t).abs()], dim=-1)).squeeze(-1)
 
 
+class BilinearReadout(nn.Module):
+    """Final logit from a visual summary z and the sentence vector.
+
+    mode="mlp":          MLP(z)
+    mode="bilinear_mlp": MLP([z, z * W q]) (first-order interaction at init)
+    mode="cosine":       scale * cos(W z, U q) + bias (bounded logit, like the lab
+                         baseline; on 5k images unbounded MLP read-outs memorised the
+                         training pairs and stayed at chance on val, see KaggleTemplate.md)
+    """
+
+    def __init__(self, dim, text_dim, hidden, dropout=0.1, mode="cosine", proj_dim=256, init_scale=10.0, activation="relu"):
+        super().__init__()
+        if mode is True:
+            mode = "bilinear_mlp"
+        elif mode is False:
+            mode = "mlp"
+        self.mode = mode
+        if mode == "cosine":
+            self.zp = nn.Linear(dim, proj_dim)
+            self.qp = nn.Linear(text_dim, proj_dim)
+            self.scale = nn.Parameter(torch.tensor(float(init_scale)))
+            self.bias = nn.Parameter(torch.tensor(0.0))
+            self.drop = nn.Dropout(dropout)
+        else:
+            self.q = nn.Linear(text_dim, dim) if mode == "bilinear_mlp" else None
+            self.mlp = mlp([dim * (2 if self.q is not None else 1), hidden, 1], dropout, activation=activation)
+
+    def forward(self, z, sentence):
+        if self.mode == "cosine":
+            a = F.normalize(self.zp(self.drop(z)), dim=-1)
+            b = F.normalize(self.qp(sentence), dim=-1)
+            return self.scale * (a * b).sum(-1) + self.bias
+        if self.q is not None:
+            z = torch.cat([z, z * self.q(sentence)], dim=-1)
+        return self.mlp(z).squeeze(-1)
+
+
 class FiLMBlock(nn.Module):
     """FiLM residual block (Perez et al., 2018): conv1x1 -> conv3x3 -> BN -> FiLM -> ReLU + skip."""
 
@@ -100,8 +150,7 @@ class FiLMStack(nn.Module):
         )
         self.blocks = nn.ModuleList(FiLMBlock(hidden_channels, coord_channels) for _ in range(num_blocks))
         self.film = nn.Linear(text_dim, num_blocks * 2 * hidden_channels)
-        nn.init.zeros_(self.film.weight)
-        nn.init.zeros_(self.film.bias)
+        # (default init: a zero init leaves no text-image interaction to start learning from)
         self.num_blocks, self.hidden = num_blocks, hidden_channels
         self.out_channels = hidden_channels
 
@@ -127,9 +176,15 @@ class FiLMHead(nn.Module):
         classifier_channels=512,
         classifier_hidden=1024,
         dropout=0.1,
+        readout="cosine",
+        input_pool=None,
+        feature_dropout=0.0,
         requires_spatial=True,
+        readout_activation="relu",
     ):
         super().__init__()
+        self.input_pool = tuple(input_pool) if input_pool else None
+        self.in_drop = nn.Dropout2d(feature_dropout)
         self.stack = FiLMStack(in_channels, text_dim, num_blocks, hidden_channels, coord_channels)
         extra = 2 if coord_channels else 0
         self.coord_channels = coord_channels
@@ -138,12 +193,16 @@ class FiLMHead(nn.Module):
             nn.BatchNorm2d(classifier_channels),
             nn.ReLU(inplace=True),
         )
-        self.classifier = mlp([classifier_channels, classifier_hidden, 1], dropout)
+        self.readout = BilinearReadout(
+            classifier_channels, text_dim, classifier_hidden, dropout, readout, activation=readout_activation
+        )
 
     def forward(self, image, text):
-        x = self.stack(image, text[0])
+        if self.input_pool:
+            image = adaptive_pool(image, self.input_pool)
+        x = self.stack(self.in_drop(image), text[0])
         x = self.proj(with_coords(x, self.coord_channels))
-        return self.classifier(x.amax(dim=(2, 3))).squeeze(-1)
+        return self.readout(x.amax(dim=(2, 3)), text[0])
 
 
 class MACHead(nn.Module):
@@ -263,7 +322,7 @@ class RelationHead(nn.Module):
         self.rn = RelationModule(obj_dim, text_dim, g_hidden, g_layers, f_hidden, f_layers, dropout)
 
     def forward(self, image, text):
-        x = self.reduce(F.adaptive_avg_pool2d(image, self.pool_to))
+        x = self.reduce(adaptive_pool(image, self.pool_to))
         x = with_coords(x, self.coord_channels)
         return self.rn(x.flatten(2).transpose(1, 2), text[0])
 
@@ -289,6 +348,137 @@ class FiLMRelationHead(nn.Module):
 
     def forward(self, image, text):
         x = self.stack(image, text[0])
-        x = F.adaptive_avg_pool2d(x, self.pool_to)
+        x = adaptive_pool(x, self.pool_to)
         x = with_coords(x, self.coord_channels)
         return self.rn(x.flatten(2).transpose(1, 2), text[0])
+
+
+class TransformerHead(nn.Module):
+    """Joint self-attention over [CLS] + caption tokens + feature-map cells.
+
+    Cells get a 1x1 projection plus a learned 2D position embedding; tokens are the
+    text encoder's states. Attention dot products between words and cells give a strong
+    multiplicative text-image interaction from the first step, which FiLM's sentence-level
+    modulation lacks on this small dataset. The [CLS] output feeds an MLP.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        text_dim,
+        dim=256,
+        num_layers=4,
+        num_heads=8,
+        ff_dim=512,
+        dropout=0.1,
+        max_cells=(20, 30),
+        readout="cosine",
+        requires_spatial=True,
+    ):
+        super().__init__()
+        self.cell_proj = nn.Sequential(nn.Conv2d(in_channels, dim, 1), nn.BatchNorm2d(dim))
+        self.pos = nn.Parameter(torch.zeros(1, dim, *max_cells))
+        nn.init.trunc_normal_(self.pos, std=0.02)
+        self.tok_proj = nn.Linear(text_dim, dim)
+        self.type_emb = nn.Parameter(torch.zeros(3, dim))  # cls, word, cell
+        nn.init.trunc_normal_(self.type_emb, std=0.02)
+        layer = nn.TransformerEncoderLayer(dim, num_heads, ff_dim, dropout, batch_first=True, norm_first=True, activation="gelu")
+        self.encoder = nn.TransformerEncoder(layer, num_layers, enable_nested_tensor=False)
+        self.norm = nn.LayerNorm(dim)
+        self.readout = BilinearReadout(dim, text_dim, dim, dropout, readout)
+
+    def forward(self, image, text):
+        _, words, mask = text
+        cells = self.cell_proj(image)
+        h, w = cells.shape[-2:]
+        pos = self.pos if self.pos.shape[-2:] == (h, w) else F.interpolate(self.pos, size=(h, w), mode="bilinear", align_corners=False)
+        cells = (cells + pos).flatten(2).transpose(1, 2) + self.type_emb[2]
+        words = self.tok_proj(words) + self.type_emb[1]
+        cls = self.type_emb[0].expand(words.shape[0], 1, -1)
+        x = torch.cat([cls, words, cells], dim=1)
+        pad = torch.cat([torch.zeros_like(mask[:, :1]), ~mask, torch.zeros(mask.shape[0], cells.shape[1], dtype=torch.bool, device=mask.device)], dim=1)
+        x = self.encoder(x, src_key_padding_mask=pad)
+        return self.readout(self.norm(x[:, 0]), text[0])
+
+
+class QueryHead(nn.Module):
+    """Text-conditioned probes over feature-map cells, with relational read-outs.
+
+    The caption produces K query vectors (attention over word states). Each query is
+    scored against every cell embedding (cell features + coordinates):
+        s[k, i] = <q_k, v_i> / sqrt(d) + b_k
+    and summarised into features that are first-order in the text-image interaction:
+      - existence: logsumexp_i s[k, i] (soft max),
+      - count: sum_i sigmoid(s[k, i]) / cells_per_object,
+      - location: softmax_i(s[k]) weighted (x, y),
+      - relations: for every query pair (k, l), the soft count of cells matching l that
+        lie left/right/behind/in front of query k's attended location.
+    An MLP over these features (and the sentence) gives the logit. Unlike FiLM/MAC with an
+    MLP read-out, the gradient for aligning words with visual directions exists from the
+    first step, so training does not sit on the chance-level saddle.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        text_dim,
+        dim=256,
+        num_queries=6,
+        hidden=512,
+        dropout=0.1,
+        relation_temp=8.0,
+        feature_dropout=0.0,
+        sentence_in_readout=True,
+        readout="mlp",
+        requires_spatial=True,
+    ):
+        super().__init__()
+        self.k = num_queries
+        self.in_drop = nn.Dropout2d(feature_dropout)
+        self.sentence_in_readout = sentence_in_readout
+        self.cells = nn.Sequential(nn.Conv2d(in_channels + 2, dim, 1), nn.BatchNorm2d(dim), nn.ReLU(inplace=True), nn.Conv2d(dim, dim, 1))
+        self.word_attn = nn.Linear(text_dim, num_queries)
+        self.query = nn.Linear(text_dim, dim)
+        self.query_sent = nn.Linear(text_dim, num_queries * dim)
+        self.bias = nn.Linear(text_dim, num_queries)
+        # Unit-scale scores at init: with tiny ||q||, ||v|| the scores are near-constant and
+        # the interaction gradient is negligible.
+        self.v_norm = nn.GroupNorm(1, dim, affine=False)
+        self.q_norm = nn.LayerNorm(dim)
+        self.temp = relation_temp
+        n_feat = num_queries * 5 + num_queries * num_queries * 4
+        self.feat_norm = nn.LayerNorm(n_feat)
+        self.readout_mode = readout
+        if readout == "mlp":
+            self.mlp = mlp([n_feat + (text_dim if sentence_in_readout else 0), hidden, hidden, 1], dropout)
+        else:
+            self.readout = BilinearReadout(n_feat, text_dim, hidden, dropout, readout)
+
+    def forward(self, image, text):
+        sentence, words, mask = text
+        b = image.shape[0]
+        image = self.in_drop(image)
+        coords = coord_map(image)
+        v = self.v_norm(self.cells(torch.cat([image, coords], dim=1))).flatten(2)  # [B, d, N]
+        xy = coords.flatten(2)  # [B, 2, N]
+        att = self.word_attn(words).masked_fill(~mask[..., None], -1e4).softmax(dim=1)  # [B, L, K]
+        q = self.q_norm(self.query(torch.einsum("blk,bld->bkd", att, words)) + self.query_sent(sentence).view(b, self.k, -1))
+        s = torch.einsum("bkd,bdn->bkn", q, v) / v.shape[1] ** 0.5 + self.bias(sentence)[..., None]  # [B, K, N]
+
+        exist = torch.logsumexp(s, dim=-1) - math.log(s.shape[-1])
+        p = torch.sigmoid(s)
+        count = p.sum(-1)
+        w = s.softmax(-1)
+        loc = torch.einsum("bkn,bcn->bkc", w, xy)  # [B, K, 2] attended (x, y)
+        # Directional soft counts: cells of query l relative to the location of query k.
+        dx = xy[:, None, 0, :] - loc[..., 0:1]  # [B, K, N]
+        dy = xy[:, None, 1, :] - loc[..., 1:2]
+        dirs = torch.stack([torch.sigmoid(-self.temp * dx), torch.sigmoid(self.temp * dx), torch.sigmoid(-self.temp * dy), torch.sigmoid(self.temp * dy)], dim=2)  # [B, K, 4, N]
+        rel = torch.einsum("bkrn,bln->bklr", dirs, p).flatten(1)  # [B, K*K*4]
+        feats = torch.cat([exist, count, loc.flatten(1), p.amax(-1), rel], dim=-1)
+        feats = self.feat_norm(feats)
+        if self.readout_mode != "mlp":
+            return self.readout(feats, sentence)
+        if self.sentence_in_readout:
+            feats = torch.cat([feats, sentence], dim=-1)
+        return self.mlp(feats).squeeze(-1)

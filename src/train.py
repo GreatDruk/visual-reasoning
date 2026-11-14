@@ -1,16 +1,19 @@
 import json
 import logging
+import platform
 import time
 from pathlib import Path
 
 import hydra
 import numpy as np
+import polars as pl
 import torch
+import torchvision
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate as _instantiate
 from omegaconf import OmegaConf
 
-from .data import ArraySource, concat_splits, load_split, paraphrased, save_submission, subset
+from .data import ArraySource, concat_splits, load_split, paraphrased, sample_pairs_by_category, save_submission, subset
 from .features import cache_features, cache_key, load_images
 from .metrics import evaluate_scores
 from .models.model import VisualReasoningModel
@@ -96,15 +99,35 @@ def main(cfg):
     if cfg.save_config:
         _archive_config(cfg)
 
-    splits = {s: load_split(s, cfg.data[f"{s}_csv"]) for s in ("train", "val", "test")}
-    if cfg.data.get("limit"):
-        # Smoke tests: keep the first `limit` captions (whole twin pairs) of train and val.
-        for s in ("train", "val"):
+    OmegaConf.save(cfg, out_dir / "config.yaml", resolve=True)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    if cfg.loss.pair_weight > 0 and not cfg.train.pair_sampler:
+        raise ValueError("pair_weight > 0 requires train.pair_sampler=true")
+    if cfg.train.pair_sampler and cfg.train.batch_size % 2:
+        raise ValueError("pair sampler requires an even train.batch_size")
+    pairs_per_category = cfg.data.train_pairs_per_category
+    if pairs_per_category is not None and (cfg.data.limit is not None or cfg.data.train_on_val):
+        raise ValueError("data.train_pairs_per_category cannot be combined with data.limit or train_on_val")
+    names = ["train"]
+    if cfg.train.eval.holdout or cfg.data.train_on_val:
+        names.append("val")
+    splits = {s: load_split(s, cfg.data[f"{s}_csv"]) for s in names}
+    if pairs_per_category is not None:
+        splits["train"] = sample_pairs_by_category(splits["train"], pairs_per_category, cfg.seed)
+    if cfg.data.limit is not None:
+        # Smoke tests: retain whole twin pairs in every loaded split.
+        for s in splits:
             sp = splits[s]
             splits[s] = subset(sp, np.isin(sp.pair_ids, np.unique(sp.pair_ids)[: cfg.data.limit // 2]))
+    for name, split in splits.items():
+        if not len(split):
+            raise ValueError(f"{name}: empty split after data.limit; at least one complete pair is required")
 
     need_flip = cfg.aug.image.hflip_swap_lr > 0
+    cache_start = time.time()
     encoder, in_channels, image_mode = _attach_sources(cfg, splits, device, need_flip)
+    cache_min = (time.time() - cache_start) / 60
 
     train_split = splits["train"]
     if cfg.data.train_on_val:
@@ -112,9 +135,8 @@ def main(cfg):
 
     # Vocabulary from the labelled training captions (and their rewrites) only.
     vocab_captions = list(train_split.captions)
-    if cfg.data.train_on_val is False:
-        vocab_captions += splits["val"].captions
-    vocab_captions += [p for c, cat in zip(train_split.captions, train_split.categories) for p in paraphrases(c, cat)]
+    if cfg.aug.text.reorder_clauses_p > 0:
+        vocab_captions += [p for c, cat in zip(train_split.captions, train_split.categories) for p in paraphrases(c, cat)]
     vocab = Vocab(vocab_captions, lowercase=cfg.model.text_encoder.get("lowercase", True))
 
     text_encoder = instantiate(cfg.model.text_encoder, vocab_size=len(vocab))
@@ -127,51 +149,98 @@ def main(cfg):
     log.info(f"trainable params: {n_params / 1e6:.2f}M, vocab {len(vocab)}, in_channels {in_channels}")
 
     loss_fn = instantiate(cfg.loss)
-    trainer = Trainer(model, loss_fn, vocab, cfg.train, device, image_mode, cfg.data.image_size, cfg.data.normalize, cfg.seed)
+    train_cfg = OmegaConf.create(OmegaConf.to_container(cfg.train, resolve=True))
+    preparation_min = (time.time() - t_start) / 60
+    if cfg.train.time_budget_min:
+        remaining = cfg.train.time_budget_min - preparation_min
+        if remaining <= 0:
+            raise RuntimeError("Training time budget exhausted during preparation")
+        train_cfg.time_budget_min = remaining
+    trainer = Trainer(model, loss_fn, vocab, train_cfg, device, image_mode, cfg.data.image_size, cfg.data.normalize, cfg.seed)
     aug = {"hflip_swap_lr": cfg.aug.image.hflip_swap_lr, "reorder_clauses_p": cfg.aug.text.reorder_clauses_p}
 
     eval_splits = {}
-    if not cfg.data.train_on_val:
-        eval_splits = {"val": splits["val"], "val_para": paraphrased(splits["val"])}
+    if cfg.train.eval.train:
+        eval_splits["train_fit"] = train_split
+    if cfg.train.eval.holdout and not cfg.data.train_on_val:
+        eval_splits.update({"val": splits["val"], "val_para": paraphrased(splits["val"])})
+    if cfg.train.early_stopping is not None:
+        available = set()
+        for name, split in eval_splits.items():
+            metrics = ["auc", "accuracy"]
+            if split.pair_ids is not None:
+                metrics.append("pair_accuracy")
+            metrics.extend(f"auc/{category}" for category in sorted(set(split.categories)))
+            available.update(f"{name}_{metric}" for metric in metrics)
+        monitor = cfg.train.early_stopping.monitor
+        if monitor not in available:
+            raise ValueError(f"early stopping monitor {monitor!r} unavailable; choose from {sorted(available)}")
+    fit_start = time.time()
     history = trainer.fit(train_split, eval_splits, aug)
+    fit_min = (time.time() - fit_start) / 60
     train_min = (time.time() - t_start) / 60
 
-    results = {"name_exp": cfg.name_exp, "epochs_run": len(history), "train_min": round(train_min, 1), "trainable_params": n_params}
-    if eval_splits:
-        for name, split in eval_splits.items():
-            metrics, logits = trainer.evaluate(split)
-            results[name] = metrics
+    results = {
+        "name_exp": cfg.name_exp, "seed": cfg.seed,
+        "architecture": f"{cfg.model.image_encoder.arch}/{type(text_encoder).__name__}/{type(fusion).__name__}",
+        "epochs_run": len(history), "best_epoch": trainer.best_epoch,
+        "stop_reason": trainer.stop_reason,
+        "device": str(device), "python_version": platform.python_version(),
+        "torch_version": torch.__version__, "torchvision_version": torchvision.__version__,
+        "cache_min": round(cache_min, 4), "preparation_min": round(preparation_min, 4),
+        "fit_min": round(fit_min, 4), "train_min": round(train_min, 4),
+        "trainable_params": n_params,
+    }
+    predict_start = time.time()
+    for name, split in eval_splits.items():
+        metrics, logits = trainer.evaluate(split)
+        results[name] = metrics
+        if name in ("val", "val_para") and cfg.train.postprocess.twin_normalize:
             names = [split.image_names[i] for i in split.img_idx]
             pairs = find_twins(names, split.captions, split.categories)
             tn = twin_normalize(logits, pairs)
             results[f"{name}_twin_norm"] = {k: v for k, v in evaluate_scores(tn, split.labels, split.categories, split.pair_ids).items() if "/" not in k}
-            np.save(out_dir / f"{name}_logits.npy", logits)
-        v = results["val"]
-        log.info(
-            f"RESULT {cfg.name_exp}: val auc {v['auc']:.4f} acc {v['accuracy']:.4f} pair_acc {v['pair_accuracy']:.4f} | "
-            f"val_para auc {results['val_para']['auc']:.4f} | twin_norm auc {results['val_twin_norm']['auc']:.4f}"
-        )
-        log.info("per-category val auc: " + ", ".join(f"{k[4:]} {x:.3f}" for k, x in v.items() if k.startswith("auc/")))
+        np.save(out_dir / f"{name}_logits.npy", logits)
+        np.save(out_dir / f"{name}_ids.npy", split.ids)
+        log.info(f"RESULT {cfg.name_exp} {name}: auc {metrics['auc']:.4f} acc {metrics['accuracy']:.4f} "
+                 f"pair_acc {metrics['pair_accuracy']:.4f}")
 
-    # Test predictions.
-    test = splits["test"]
-    test_logits = trainer.predict(test)
-    np.save(out_dir / "test_logits.npy", test_logits)
-    probs = 1 / (1 + np.exp(-test_logits))
-    if cfg.train.postprocess.twin_normalize:
-        names = [test.image_names[i] for i in test.img_idx]
-        probs = twin_normalize(test_logits, find_twins(names, test.captions, test.categories))
-    fusion_name = cfg.model.fusion._target_.rsplit(".", 1)[-1]
-    sub_path = save_submission(
-        test.ids, probs, f"{cfg.paths.submissions_dir}/submission_{fusion_name}_{cfg.model.image_encoder.arch}_{cfg.name_exp}.csv", cfg.data.submission_target_col
-    )
-    results["submission"] = str(sub_path.relative_to(resolve_path(".")))
-    results["total_min"] = round((time.time() - t_start) / 60, 1)
+    if cfg.train.predict_test:
+        # Test data is first accessed only after fitting and restoring selected weights.
+        test = load_split("test", cfg.data.test_csv)
+        _attach_sources(cfg, {"test": test}, device, False)
+        test_logits = trainer.predict(test)
+        np.save(out_dir / "test_logits.npy", test_logits)
+        np.save(out_dir / "test_ids.npy", test.ids)
+        probs = torch.sigmoid(torch.from_numpy(test_logits)).numpy()
+        if cfg.train.postprocess.twin_normalize:
+            names = [test.image_names[i] for i in test.img_idx]
+            probs = twin_normalize(test_logits, find_twins(names, test.captions, test.categories))
+        sample = pl.read_csv(resolve_path(cfg.data.sample_submission))
+        if [c for c in sample.columns if c != "id"] != [cfg.data.submission_target_col]:
+            raise ValueError("sample submission target column does not match data.submission_target_col")
+        sample_ids = sample["id"].to_numpy()
+        if (len(probs) != len(test.ids) or len(test.ids) != len(sample_ids)
+                or len(np.unique(test.ids)) != len(test.ids)
+                or len(np.unique(sample_ids)) != len(sample_ids)
+                or set(test.ids) != set(sample_ids)):
+            raise ValueError("test and sample must contain the same unique ids exactly once")
+        if not np.isfinite(probs).all() or ((probs < 0) | (probs > 1)).any():
+            raise ValueError("submission probabilities must be finite and in [0, 1]")
+        positions = {row_id: i for i, row_id in enumerate(test.ids)}
+        ordered_probs = probs[[positions[row_id] for row_id in sample_ids]]
+        sub_path = save_submission(sample_ids, ordered_probs, cfg.paths.submission, cfg.data.submission_target_col)
+        results["submission"] = str(cfg.paths.submission)
+        log.info(f"submission {sub_path}")
+    results["predict_min"] = round((time.time() - predict_start) / 60, 4)
+    results["peak_cuda_memory_mb"] = torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else None
     results["history"] = history
-    (out_dir / "results.json").write_text(json.dumps(results, indent=2))
+    (out_dir / "vocab.json").write_text(json.dumps({"itos": vocab.itos, "lowercase": vocab.lowercase}, indent=2))
     torch.save(model.state_dict(), out_dir / "model.pt")
-    log.info(f"submission {sub_path}; total {results['total_min']} min")
-    return results["val"]["auc"] if eval_splits else 0.0
+    results["total_min"] = round((time.time() - t_start) / 60, 4)
+    (out_dir / "results.json").write_text(json.dumps(results, indent=2))
+    log.info(f"total {results['total_min']} min")
+    return results["val"]["auc"] if "val" in results else 0.0
 
 
 if __name__ == "__main__":

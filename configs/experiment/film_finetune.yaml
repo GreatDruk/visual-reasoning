@@ -1,0 +1,67 @@
+# @package _global_
+# Кандидат: частичное дообучение CNN (freeze=true, unfreeze_last_n_blocks=2) + FiLM + MLP readout, batch 32.
+# Это пакетный кандидат (fine-tuning + MLP + batch32), а не причинная абляция одного параметра
+# относительно 009: прирост нельзя приписывать только размораживанию.
+# train + val, без test/final; monitor только raw val_auc.
+defaults:
+  - override /model/image_encoder: resnet50
+  - override /model/text_encoder: gru
+  - override /model/fusion: film
+  - override /loss: bce
+  - override /aug: none
+
+seed: 42
+model:
+  init_from: null
+  image_encoder:
+    weights: IMAGENET1K_V2
+    out_layer: layer3
+    spatial: true
+    freeze: true
+    unfreeze_last_n_blocks: 2   # последние два residual-блока layer3; вся CNN остаётся eval по BN
+  text_encoder:
+    embed_dim: 200
+    hidden_dim: 256
+    num_layers: 1
+    bidirectional: true
+    dropout: 0.1
+  fusion:
+    num_blocks: 4
+    hidden_channels: 128
+    coord_channels: true
+    classifier_channels: 512
+    classifier_hidden: 1024
+    readout: mlp
+    dropout: 0.1
+    input_pool: null
+    feature_dropout: 0.0
+data:
+  train_on_val: false
+  image_size: [160, 240]
+  normalize: imagenet
+  limit: null
+  train_pairs_per_category: null   # полный train
+train:
+  epochs: 30
+  batch_size: 32
+  pair_sampler: true
+  optimizer:
+    lr: 3.0e-4                    # GRU/fusion
+    image_encoder_lr: 3.0e-5      # дообучаемые блоки CNN, отношение 1:10
+    weight_decay: 1.0e-4
+  scheduler:
+    name: cosine
+    warmup_epochs: 1
+  amp: true
+  grad_clip: 1.0
+  cache_features: false           # замороженный feature-cache нельзя использовать для дообучаемой CNN
+  predict_test: false
+  time_budget_min: 45
+  early_stopping:
+    monitor: val_auc
+    patience: 8
+  eval:
+    train: true                   # явные fitted-train метрики
+    holdout: true
+  postprocess:
+    twin_normalize: false

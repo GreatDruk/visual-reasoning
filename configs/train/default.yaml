@@ -4,6 +4,7 @@ pair_sampler: true              # оба близнеца в одном батч
 optimizer:
   _target_: torch.optim.AdamW
   lr: 3.0e-4
+  image_encoder_lr: null
   weight_decay: 1.0e-4
 scheduler:
   name: cosine
@@ -15,7 +16,10 @@ early_stopping:
   patience: 4
 time_budget_min: 45             # лимит 50 мин на Kaggle GPU, оставляем запас на инференс
 cache_features: true            # при замороженном энкодере считать фичи один раз
+predict_test: false             # false: test не читается вообще; true: финальный запуск — предсказания после обучения
 eval:
+  train: false
+  holdout: true
   metrics: [auc, accuracy, pair_accuracy, auc_per_category]
 postprocess:
   twin_normalize: false         # softmax внутри найденных пар близнецов в test

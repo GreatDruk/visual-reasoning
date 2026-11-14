@@ -6,9 +6,9 @@ defaults:
   - data: default
   - model/image_encoder: resnet50   # resnet101: веса недоступны офлайн на dev-машине
   - model/text_encoder: gru
-  - model/fusion: film
-  - loss: bce_pair
-  - aug: default
+  - model/fusion: cosine            # безопасный старт: бейзлайн без обучаемого взаимодействия
+  - loss: bce
+  - aug: none
   - train: default
   - tune: none
   - _self_
@@ -24,7 +24,7 @@ paths:
   output_dir: artefacts/hydra/${name_exp}/${now:%Y-%m-%d_%H-%M-%S}
   features_dir: artefacts/features
   submissions_dir: submissions
-  submission: final_submission.csv
+  submission: ${paths.submissions_dir}/${name_exp}.csv   # именованный по прогону; final переопределяет
 
 hydra:
   job:
