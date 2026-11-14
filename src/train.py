@@ -65,6 +65,23 @@ def _attach_sources(cfg, splits, device, need_flip):
     return encoder, encoder.out_channels, "images"
 
 
+def _warm_start(model, name_exp):
+    """Copy every parameter whose name and shape match from the latest run of `name_exp`.
+
+    Spatial heads start at chance and take many epochs to find the text-image interaction;
+    starting from a model trained on pooled features (same weights, 1x1 input) skips that.
+    """
+    runs = sorted(resolve_path(f"artefacts/hydra/{name_exp}").glob("*/model.pt"))
+    if not runs:
+        raise FileNotFoundError(f"no model.pt for init_from={name_exp}")
+    src = torch.load(runs[-1], map_location="cpu")
+    own = model.state_dict()
+    copied = {k: v for k, v in src.items() if k in own and own[k].shape == v.shape}
+    own.update(copied)
+    model.load_state_dict(own)
+    log.info(f"warm start from {runs[-1]}: {len(copied)}/{len(own)} tensors copied")
+
+
 @hydra.main(config_path="../configs", config_name="config")
 def main(cfg):
     """Train one configuration, report validation metrics, write a submission.
@@ -76,7 +93,7 @@ def main(cfg):
     device = get_device(cfg.device)
     out_dir = Path(HydraConfig.get().runtime.output_dir)
     log.info(f"{cfg.name_exp} on {device}; output {out_dir}")
-    if cfg.archive:
+    if cfg.save_config:
         _archive_config(cfg)
 
     splits = {s: load_split(s, cfg.data[f"{s}_csv"]) for s in ("train", "val", "test")}
@@ -104,6 +121,8 @@ def main(cfg):
     fusion = instantiate(cfg.model.fusion, in_channels=in_channels, text_dim=text_encoder.out_dim, _convert_="all")
     spatial = cfg.model.image_encoder.spatial or cfg.model.fusion.requires_spatial
     model = VisualReasoningModel(text_encoder, fusion, image_encoder=encoder, spatial=spatial)
+    if cfg.model.get("init_from"):
+        _warm_start(model, cfg.model.init_from)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"trainable params: {n_params / 1e6:.2f}M, vocab {len(vocab)}, in_channels {in_channels}")
 
