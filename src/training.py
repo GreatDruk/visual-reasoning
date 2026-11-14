@@ -178,8 +178,11 @@ class Trainer:
                 metrics, _ = self.evaluate(split)
                 row.update({f"{name}_{k}": v for k, v in metrics.items()})
             history.append(row)
-            log.info(" | ".join(f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
-                                for k, v in row.items() if "_auc/" not in k))
+            log.info(" | ".join(
+                f"{k} {v:.3e}" if k.startswith("lr/") else
+                f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
+                for k, v in row.items() if "_auc/" not in k
+            ))
 
             score = row[monitor] if es is not None else -row["loss"]
             improved = score > best
