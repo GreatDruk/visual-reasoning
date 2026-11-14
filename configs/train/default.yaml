@@ -9,6 +9,7 @@ optimizer:
 scheduler:
   name: cosine
   warmup_epochs: 1
+  warmup_steps: null           # null: warmup_epochs; иначе абсолютное число optimizer steps
 amp: true
 grad_clip: 1.0
 early_stopping:

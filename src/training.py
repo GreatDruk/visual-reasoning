@@ -109,7 +109,9 @@ class Trainer:
             log.info(f"optimizer {group['name']}: {sum(p.numel() for p in group['params'])} parameters, lr {group['lr']}")
         steps_per_epoch = math.ceil(len(train_split) / cfg.batch_size)
         total = steps_per_epoch * cfg.epochs
-        warmup = steps_per_epoch * cfg.scheduler.get("warmup_epochs", 0)
+        warmup = cfg.scheduler.get("warmup_steps")
+        if warmup is None:
+            warmup = steps_per_epoch * cfg.scheduler.get("warmup_epochs", 0)
 
         def lr_lambda(step):
             if step < warmup:

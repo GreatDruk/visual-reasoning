@@ -154,6 +154,36 @@ class TestTrainingDiagnostics(unittest.TestCase):
             self.assertFalse(list((tmp / "out").glob("test_*")))
             self.assertFalse(list((tmp / "subs").glob("*.csv")))
 
+    def test_absolute_warmup_overrides_epochs_and_preserves_legacy(self):
+        with tempfile.TemporaryDirectory() as td:
+            for setting, expected in ((None, [1/3, 2/3, 1]), (2, [.5, 1, 1]), (0, [1, 1, 1])):
+                root = Path(td) / str(setting)
+                root.mkdir()
+                model, vocab, split, cfg = self.setup_case(root)
+                cfg.diagnostics.enabled = True
+                cfg.scheduler.warmup_epochs = 1
+                if setting is not None:
+                    cfg.scheduler.warmup_steps = setting
+                trainer = Trainer(model, TruthLoss(), vocab, cfg, torch.device("cpu"),
+                                  "images", [64, 96], seed=7, diagnostics_dir=root)
+                trainer.fit(split, {}, {})
+                events = [json.loads(line) for line in (root / "diagnostics.jsonl").read_text().splitlines()]
+                steps = [row for row in events if row["event"] == "optimizer_step"]
+                np.testing.assert_allclose([row["lr_used"]["task"] / cfg.optimizer.lr for row in steps], expected)
+                np.testing.assert_allclose([row["lr_used"]["image_encoder"] / cfg.optimizer.image_encoder_lr
+                                           for row in steps], expected)
+
+    def test_signed_margins_use_labels_not_row_order(self):
+        from src.diagnostics import prediction_summary
+
+        # Pairs are interleaved; one is reversed in row order, one is tied.
+        summary = prediction_summary(np.array([0., 2., 1., 2., 1., -1.]),
+                                     np.array([0, 0, 1, 1, 0, 1]), np.array([8, 9, 8, 9, 10, 10]))
+        self.assertAlmostEqual(summary["signed_pair_margin"]["mean"], -1/3, places=6)
+        self.assertEqual(summary["pair_accuracy"], .5)
+        expected = torch.nn.functional.softplus(torch.tensor([-1., 0., 2.])).mean()
+        self.assertAlmostEqual(summary["pair_logistic"], float(expected))
+
 
 if __name__ == "__main__":
     unittest.main()

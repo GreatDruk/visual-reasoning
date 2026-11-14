@@ -62,6 +62,24 @@ def _norm(tensors):
     return float(torch.stack(norms).norm()) if norms else 0.0
 
 
+def prediction_summary(logits, labels, pair_ids):
+    """Signed true-minus-false margins and distributions on aligned labelled rows."""
+    z = torch.as_tensor(np.asarray(logits), dtype=torch.float32)
+    y = torch.as_tensor(np.asarray(labels), dtype=torch.float32)
+    order = np.argsort(pair_ids, kind="stable").reshape(-1, 2)
+    pairs = torch.as_tensor(order)
+    margins = (z[pairs[:, 0]] - z[pairs[:, 1]]) * (y[pairs[:, 0]] - y[pairs[:, 1]])
+    def distribution(value):
+        return {**_stats(value), "p05_p50_p95": torch.quantile(value, torch.tensor([.05, .5, .95])).tolist()}
+    return {
+        "logits": distribution(z), "probabilities": distribution(z.sigmoid()),
+        "signed_pair_margin": distribution(margins),
+        "pair_accuracy": float(((margins > 0).float() + .5 * (margins == 0)).mean()),
+        "bce": float(torch.nn.functional.binary_cross_entropy_with_logits(z, y)),
+        "pair_logistic": float(torch.nn.functional.softplus(-margins).mean()),
+    }
+
+
 class TrainingDiagnostics:
     """Observe selected optimizer steps and a fixed train-only intervention probe."""
 
@@ -230,6 +248,13 @@ class TrainingDiagnostics:
         row.update(loss=float(loss.detach()), logits=logits.detach().cpu().tolist(), stepped=stepped,
                    lr_after={g["name"]: g["lr"] for g in optimizer.param_groups},
                    gradients_after_clip=self._gradient_stats())
+        detached = logits.detach()
+        row["bce"] = float(torch.nn.functional.binary_cross_entropy_with_logits(
+            detached, batch["labels"].to(detached.device).float()))
+        if "pair_index" in batch:
+            pairs = batch["pair_index"].to(detached.device)
+            row["pair_logistic"] = float(torch.nn.functional.softplus(
+                -(detached[pairs[:, 0]] - detached[pairs[:, 1]])).mean())
         row["updates"] = {}
         for name, params in self.groups.items():
             before = self.before[name]
@@ -301,6 +326,7 @@ class TrainingDiagnostics:
             sensitivity[name] = {"mean_abs_delta": delta, "delta_over_std": delta / scale if scale else None}
         self.emit({"event": "probe", "epoch": epoch, "step": step, "reason": reason,
                    "metrics": metrics,
+                   "prediction_summary": prediction_summary(logits, split.labels, split.pair_ids),
                    "logits": logits.tolist(), "image_shuffled_logits": image_logits.tolist(),
                    "caption_swapped_logits": text_logits.tolist(), "activations": statistics,
                    "channel_distributions": channels,
