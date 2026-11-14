@@ -156,7 +156,8 @@ def main(cfg):
         if remaining <= 0:
             raise RuntimeError("Training time budget exhausted during preparation")
         train_cfg.time_budget_min = remaining
-    trainer = Trainer(model, loss_fn, vocab, train_cfg, device, image_mode, cfg.data.image_size, cfg.data.normalize, cfg.seed)
+    trainer = Trainer(model, loss_fn, vocab, train_cfg, device, image_mode, cfg.data.image_size, cfg.data.normalize,
+                      cfg.seed, diagnostics_dir=out_dir)
     aug = {"hflip_swap_lr": cfg.aug.image.hflip_swap_lr, "reorder_clauses_p": cfg.aug.text.reorder_clauses_p}
 
     eval_splits = {}

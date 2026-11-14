@@ -1,6 +1,7 @@
 """Training loop: AdamW + warmup/cosine, grad clipping, early stopping, time budget."""
 
 import copy
+from contextlib import nullcontext
 import logging
 import math
 import time
@@ -9,6 +10,7 @@ import numpy as np
 import torch
 
 from .data import eval_batches, train_batches
+from .diagnostics import TrainingDiagnostics
 from .features import preprocess
 from .metrics import evaluate_scores
 
@@ -22,7 +24,7 @@ class Trainer:
     (uint8 images, preprocessed on the device and passed through the encoder).
     """
 
-    def __init__(self, model, loss_fn, vocab, train_cfg, device, image_mode="features", image_size=None, normalize="imagenet", seed=0):
+    def __init__(self, model, loss_fn, vocab, train_cfg, device, image_mode="features", image_size=None, normalize="imagenet", seed=0, diagnostics_dir=None):
         self.model = model.to(device)
         self.loss_fn = loss_fn
         self.vocab = vocab
@@ -32,6 +34,8 @@ class Trainer:
         self.image_size = image_size
         self.normalize = normalize
         self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        self.diagnostics_dir = diagnostics_dir
         # One AMP decision per Trainer: amp off or CPU/MPS -> float32; CUDA bf16 when
         # supported, otherwise fp16 with a GradScaler (its skips must not step the LR schedule).
         self.amp_dtype = None
@@ -120,24 +124,35 @@ class Trainer:
         monitor = es.monitor if es else monitor
         best, best_state, bad_epochs, history = -np.inf, None, 0, []
         start = time.time()
+        diagnostics = None
+        diagnostic_cfg = cfg.get("diagnostics")
+        if diagnostic_cfg and diagnostic_cfg.enabled:
+            if self.diagnostics_dir is None:
+                raise ValueError("diagnostics_dir is required when training diagnostics are enabled")
+            diagnostics = TrainingDiagnostics(self, train_split, diagnostic_cfg, self.diagnostics_dir, self.seed)
+            diagnostics.probe(0, 0, "initial")
+        step = 0
 
         for epoch in range(1, cfg.epochs + 1):
             self.model.train()
             t0, losses = time.time(), []
             for batch in train_batches(train_split, cfg.batch_size, self.rng, aug, cfg.pair_sampler):
-                logits = self._forward(train_split, batch)
-                pair_index = batch.get("pair_index")
-                loss = self.loss_fn(
-                    logits,
-                    batch["labels"].to(self.device),
-                    pair_index.to(self.device) if pair_index is not None else None,
-                )
-                opt.zero_grad(set_to_none=True)
-                if self.scaler is not None:
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(opt)
-                else:
-                    loss.backward()
+                step += 1
+                observe = diagnostics is not None and diagnostics.should_capture(step)
+                with diagnostics.trace(train_split, batch, epoch, step, opt) if observe else nullcontext():
+                    logits = self._forward(train_split, batch)
+                    pair_index = batch.get("pair_index")
+                    loss = self.loss_fn(
+                        logits,
+                        batch["labels"].to(self.device),
+                        pair_index.to(self.device) if pair_index is not None else None,
+                    )
+                    opt.zero_grad(set_to_none=True)
+                    if self.scaler is not None:
+                        self.scaler.scale(loss).backward()
+                        self.scaler.unscale_(opt)
+                    else:
+                        loss.backward()
                 if cfg.grad_clip:
                     torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
                 if self.scaler is not None:
@@ -150,8 +165,13 @@ class Trainer:
                     stepped = True
                 if stepped:
                     sched.step()
+                if observe:
+                    diagnostics.finish_step(logits, loss, batch, opt, stepped)
+                    diagnostics.probe(epoch, step, "step")
                 losses.append(loss.item())
 
+            if diagnostics is not None and diagnostics.last_probe_step != step:
+                diagnostics.probe(epoch, step, "epoch_end")
             row = {"epoch": epoch, "loss": float(np.mean(losses)), "epoch_sec": round(time.time() - t0, 1)}
             row.update({f"lr/{g['name']}": g["lr"] for g in opt.param_groups})
             for name, split in eval_splits.items():
@@ -188,4 +208,6 @@ class Trainer:
                     break
 
         self.model.load_state_dict(best_state)
+        if diagnostics is not None:
+            diagnostics.probe(self.best_epoch, step, "restored")
         return history

@@ -23,3 +23,7 @@ eval:
   metrics: [auc, accuracy, pair_accuracy, auc_per_category]
 postprocess:
   twin_normalize: false         # softmax внутри найденных пар близнецов в test
+diagnostics:
+  enabled: false                # подробный train-only trace; не меняет optimizer/данные/модель
+  every_steps: 100
+  probe_pairs_per_category: 2    # фиксированный fitted-train probe; не holdout

@@ -137,6 +137,25 @@ ResNet-50 V2 выбран по уже измеренному frozen-сравне
 
 
 
+#### Поэтапная диагностика обучения
+
+Поиск сформулирован без предположения о виновности ReLU: «FiLM CNN+GRU запоминает малую выборку, но остаётся около chance на полном наборе пар; CNN features меняются между изображениями, а logits становятся image-insensitive и visual gradients уменьшаются. Как различить gradient imbalance, activation saturation, BatchNorm mismatch и modality collapse?» Отдельные запросы: `FiLM training gamma beta ReLU batch normalization`, `multimodal gradient imbalance modality dominance diagnostics`, `What Makes Training Multi-Modal Classification Networks Hard`.
+
+Первичные источники и границы переноса:
+- [Оригинальный FiLM](https://arxiv.org/html/1709.07871): ReLU/BN работали в исходной модели; подавление каналов, отрицательные beta и большой диапазон gamma являются частью обученного conditioning, а не сами по себе доказательством дефекта. Задача и объём CLEVR отличаются от текущих; чужие данные/weights не используются.
+- [Wang et al., CVPR 2020](https://openaccess.thecvf.com/content_CVPR_2020/html/Wang_What_Makes_Training_Multi-Modal_Classification_Networks_Hard_CVPR_2020_paper.html): модальности могут обучаться и переобучаться с разной скоростью. Это основание наблюдать отдельные пути, не доказательство нашей причины.
+- [Peng et al., CVPR 2022](https://openaccess.thecvf.com/content/CVPR2022/papers/Peng_Balanced_Multimodal_Learning_via_On-the-Fly_Gradient_Modulation_CVPR_2022_paper.pdf): анализ under-optimization и gradient imbalance. OGM/GE, дополнительный шум и новые heads здесь не добавляются.
+
+`train.diagnostics.enabled=true` включает `diagnostics.jsonl` и `diagnostic_probe.json` в output текущего запуска. Трассируются CNN, sentence encoder, stem, gamma/beta, FiLM-блоки, projection, pooling summary и MLP до/после активации; записываются actual batch ids/images/captions/labels/logits, LR, градиенты до/после clipping (norm и RMS), реальные изменения весов и BN modes/running statistics. Градиент на отрицательных входах MLP измеряется tensor hook **до in-place ReLU**, а не `retain_grad` на изменяемом tensor.
+
+Фиксированный probe выбирается только из fitted train: 2 пары каждой категории, всего 36 строк для полного train. В `eval/no_grad` сохраняются raw logits и метрики, logits после image derangement и swap подписей внутри пар, чувствительность к изображениям по стадиям. Manifest содержит ids/labels/captions/images, перестановки и SHA-256 начального state_dict. Снимки: до обучения, шаги 1/10/50, далее каждые 100 шагов, конец эпохи и восстановленный checkpoint. Probe — не holdout и не дополнительная training objective.
+
+[`experiment=film_trace`](configs/experiment/film_trace.yaml) делает один проход по полному train; val/test не читаются, early stopping выключен. Первый warmup epoch совпадает с режимом 018. Для matched A/B меняется только `model.fusion.readout_activation=relu|gelu`; это debug, без числового experiment ID и архивирования. Логирование по умолчанию выключено.
+
+Параллельная [интервенция на checkpoint 018](artefacts/gelu_checkpoint_intervention.json), без optimizer steps: GELU почти убрал точные нули активаций, но image sensitivity осталась порядка 0.001. Это не обученный GELU результат и не доказанный фикс. В первоначальном замере preactivation gradient обнаружена методическая ошибка `retain_grad` + in-place ReLU; поле исправлено после проверки tensor hook, который для отрицательных ReLU-входов корректно даёт нулевой градиент.
+
+Проверка инструмента: 15 CPU-регрессий прошли. На реальном training loop с dropout включение/выключение trace даёт побитово одинаковые итоговые parameters, BN buffers и torch RNG state; probe logits согласованы с manifest/labels и пересчитанными метриками. Отдельная регрессия проверяет корректное различение нулевого pre-ReLU gradient и ненулевого GELU gradient на отрицательных входах.
+
 ### Воспроизведение финала
 
 [notebooks/02_final.ipynb](notebooks/02_final.ipynb) использует один `python -m src.train experiment=final`, пустой временный feature cache и только явно приложенные ресурсы. Ожидаются supplied CSV/JPEG в `data/` и официальный `resources/torch/hub/checkpoints/resnet50-11ad3fa6.pth`; на Kaggle notebook также умеет подключить единственный подходящий ресурс из `../input`. SHA-256 весов проверяется. Зависимости должны быть установлены офлайн под фактический runtime; скрытых скачиваний и contest checkpoint нет.
