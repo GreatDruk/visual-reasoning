@@ -43,7 +43,8 @@ def preprocess(images_u8, size, normalize, flip=False):
 
 def cache_key(encoder_cfg, data_cfg):
     h, w = data_cfg.image_size
-    return f"{encoder_cfg.arch}_{encoder_cfg.out_layer}_{h}x{w}_{data_cfg.normalize}"
+    weights = "" if encoder_cfg.weights in ("IMAGENET1K_V1", None) or encoder_cfg.arch == "resnet18" else f"_{encoder_cfg.weights.lower()}"
+    return f"{encoder_cfg.arch}{weights}_{encoder_cfg.out_layer}_{h}x{w}_{data_cfg.normalize}"
 
 
 @torch.no_grad()
