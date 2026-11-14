@@ -27,3 +27,4 @@ diagnostics:
   enabled: false                # подробный train-only trace; не меняет optimizer/данные/модель
   every_steps: 100
   probe_pairs_per_category: 2    # фиксированный fitted-train probe; не holdout
+  channel_stats: true            # p05/p50/p95, mean/std, negative/near-zero fractions по каналам

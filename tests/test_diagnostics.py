@@ -50,7 +50,8 @@ class TestTrainingDiagnostics(unittest.TestCase):
             "early_stopping": None, "time_budget_min": None,
             "optimizer": {"lr": 3e-4, "image_encoder_lr": 3e-5, "weight_decay": 1e-4},
             "scheduler": {"name": "constant", "warmup_epochs": 0},
-            "diagnostics": {"enabled": False, "every_steps": 1, "probe_pairs_per_category": 2},
+            "diagnostics": {"enabled": False, "every_steps": 1, "probe_pairs_per_category": 2,
+                            "channel_stats": True},
         })
         return model, vocab, split, cfg
 
@@ -104,13 +105,21 @@ class TestTrainingDiagnostics(unittest.TestCase):
                 cfg.diagnostics.enabled = True
                 with torch.no_grad():
                     model.fusion.readout.mlp[0].weight.zero_()
-                    model.fusion.readout.mlp[0].bias.fill_(-.2)
+                    model.fusion.readout.mlp[0].bias.copy_(torch.linspace(-.8, -.2, 16))
                     model.fusion.readout.mlp[-1].weight.fill_(.1)
                 trainer = Trainer(model, TruthLoss(), vocab, cfg, torch.device("cpu"), "images", [64, 96],
                                   seed=7, diagnostics_dir=root)
                 trainer.fit(split, {}, {})
                 events = [json.loads(line) for line in (root / "diagnostics.jsonl").read_text().splitlines()]
                 first = next(event for event in events if event["event"] == "optimizer_step")
+                channels = first["channel_distributions"]["readout_linear"]
+                self.assertEqual(channels["channel_shape"], [16])
+                np.testing.assert_allclose(channels["p05"], np.linspace(-.8, -.2, 16), atol=1e-6)
+                np.testing.assert_array_equal(channels["negative_fraction"], np.ones(16))
+                grad_channels = first["activation_gradients"]["readout_linear"]["negative_input_channel_norm"]
+                np.testing.assert_allclose(np.linalg.norm(grad_channels),
+                                           first["activation_gradients"]["readout_linear"]["negative_input_norm"],
+                                           rtol=1e-5, atol=1e-9)
                 self.assertLess(first["activations"]["readout_linear"]["max"], 0.)
                 gradient = first["activation_gradients"]["readout_linear"]["negative_input_norm"]
                 if activation == "relu":

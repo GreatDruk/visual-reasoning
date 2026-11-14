@@ -156,6 +156,12 @@ ResNet-50 V2 выбран по уже измеренному frozen-сравне
 
 Проверка инструмента: 15 CPU-регрессий прошли. На реальном training loop с dropout включение/выключение trace даёт побитово одинаковые итоговые parameters, BN buffers и torch RNG state; probe logits согласованы с manifest/labels и пересчитанными метриками. Отдельная регрессия проверяет корректное различение нулевого pre-ReLU gradient и ненулевого GELU gradient на отрицательных входах.
 
+Расширение того же trace: `train.diagnostics.channel_stats=true` сохраняет по каждому FiLM-каналу каждого блока и каждому MLP unit mean/std, p05/p50/p95, долю отрицательных значений и долю `abs(x)<0.05` (наблюдательный порог, не gate). Для MLP дополнительно сохраняются нормы градиента по каналам, отдельно на отрицательных preactivation, до in-place ReLU. На фиксированном probe доступны те же распределения; новые CPU-проверки подтверждают ось каналов, значения квантилей и сохранение training state/RNG.
+
+[`experiment=film_recipe_memorize`](configs/experiment/film_recipe_memorize.yaml) повторяет 288-строчный тест с model/dropout/weight decay/LR/BN mode/cosine/warmup от `film_finetune`/018. Меняются только train subset, отсутствие holdout и train-only checkpoint selection. Это 30 эпох / 270 optimizer steps; старый облегчённый memorization уже достиг всех метрик 1.000 на шаге 270, а не только после 1080 шагов. Отдельные абляции: dropout-off (оба dropout GRU/MLP = 0, weight decay прежний) и weight-decay-off (только weight decay = 0, dropout прежний). Изменения не складываются.
+
+018 остаётся ограниченным compute результатом: 7 из 30 эпох, выбран checkpoint эпохи 3. Ни этот запуск, ни одноэпоховые traces не являются полноценной проверкой потенциала fine-tuning.
+
 ### Воспроизведение финала
 
 [notebooks/02_final.ipynb](notebooks/02_final.ipynb) использует один `python -m src.train experiment=final`, пустой временный feature cache и только явно приложенные ресурсы. Ожидаются supplied CSV/JPEG в `data/` и официальный `resources/torch/hub/checkpoints/resnet50-11ad3fa6.pth`; на Kaggle notebook также умеет подключить единственный подходящий ресурс из `../input`. SHA-256 весов проверяется. Зависимости должны быть установлены офлайн под фактический runtime; скрытых скачиваний и contest checkpoint нет.

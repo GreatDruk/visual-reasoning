@@ -34,12 +34,27 @@ def _stats(tensor):
     out.update(mean=_number(x.mean()), std=_number(x.std(unbiased=False)),
                min=_number(x.min()), max=_number(x.max()),
                zero_fraction=float((x == 0).float().mean()),
+               negative_fraction=float((x < 0).float().mean()),
+               abs_below_0_05_fraction=float((x.abs() < .05).float().mean()),
                abs_below_1e_6_fraction=float((x.abs() < 1e-6).float().mean()))
     if x.ndim == 2:
         out["all_zero_units"] = int((x == 0).all(dim=0).sum())
     if x.ndim == 4:
         out["spatial_std_mean"] = _number(x.std(dim=(2, 3), unbiased=False).mean())
     return out
+
+
+def _channels(tensor):
+    """Batch distribution per channel (and per FiLM block), never across channels."""
+    x = tensor.detach().to(device="cpu", dtype=torch.float32)
+    quantiles = torch.quantile(x, x.new_tensor([.05, .5, .95]), dim=0)
+    return {
+        "channel_shape": list(x.shape[1:]),
+        "mean": x.mean(dim=0).tolist(), "std": x.std(dim=0, unbiased=False).tolist(),
+        "p05": quantiles[0].tolist(), "p50": quantiles[1].tolist(), "p95": quantiles[2].tolist(),
+        "negative_fraction": (x < 0).float().mean(dim=0).tolist(),
+        "abs_below_0_05_fraction": (x.abs() < .05).float().mean(dim=0).tolist(),
+    }
 
 
 def _norm(tensors):
@@ -139,7 +154,7 @@ class TrainingDiagnostics:
             "images": [split.image_names[i] for i in batch["img_idx"]],
             "captions": batch["captions"], "labels": batch["labels"].tolist(),
             "lr_used": {g["name"]: g["lr"] for g in optimizer.param_groups},
-            "activations": {}, "activation_gradients": {},
+            "activations": {}, "activation_gradients": {}, "channel_distributions": {},
         }
         self.before = {name: [p.detach().clone() for p in params] for name, params in self.groups.items()}
         handles = []
@@ -155,6 +170,11 @@ class TrainingDiagnostics:
                     film = value.detach().view(-1, stack.num_blocks, 2, stack.hidden)
                     self.current["activations"]["gamma"] = _stats(1 + film[:, :, 0])
                     self.current["activations"]["beta"] = _stats(film[:, :, 1])
+                    if self.cfg.get("channel_stats", False):
+                        self.current["channel_distributions"]["gamma"] = _channels(1 + film[:, :, 0])
+                        self.current["channel_distributions"]["beta"] = _channels(film[:, :, 1])
+                if name == "readout_linear" and self.cfg.get("channel_stats", False):
+                    self.current["channel_distributions"]["readout_linear"] = _channels(value)
                 if name == "readout_linear" and value.requires_grad:
                     negative = value.detach() < 0
                     # Register before an in-place ReLU. retain_grad on its output instead
@@ -167,6 +187,11 @@ class TrainingDiagnostics:
                             "norm": _number(g.norm()), "negative_input_norm": _number(g[negative].norm()),
                             "negative_input_nonzero_count": int(torch.count_nonzero(g[negative])),
                         }
+                        if self.cfg.get("channel_stats", False):
+                            self.current["activation_gradients"]["readout_linear"].update(
+                                channel_norm=g.square().sum(dim=0).sqrt().cpu().tolist(),
+                                negative_input_channel_norm=(g * negative).square().sum(dim=0).sqrt().cpu().tolist(),
+                            )
                     handles.append(value.register_hook(gradient_record))
             return record
 
@@ -263,6 +288,12 @@ class TrainingDiagnostics:
         scores = 1 / (1 + np.exp(-logits))
         metrics = evaluate_scores(scores, split.labels, split.categories, split.pair_ids)
         statistics = {name: _stats(value) for name, value in stages.items()}
+        channels = {}
+        if self.cfg.get("channel_stats", False):
+            stack = trainer.model.fusion.stack
+            film = stages["film_params"].view(-1, stack.num_blocks, 2, stack.hidden)
+            channels = {"gamma": _channels(1 + film[:, :, 0]), "beta": _channels(film[:, :, 1]),
+                        "readout_linear": _channels(stages["readout_linear"])}
         sensitivity = {}
         for name, value in stages.items():
             delta = float((value - image_stages[name]).abs().mean())
@@ -272,6 +303,7 @@ class TrainingDiagnostics:
                    "metrics": metrics,
                    "logits": logits.tolist(), "image_shuffled_logits": image_logits.tolist(),
                    "caption_swapped_logits": text_logits.tolist(), "activations": statistics,
+                   "channel_distributions": channels,
                    "image_sensitivity_by_stage": sensitivity,
                    "image_delta": float(np.abs(logits - image_logits).mean()),
                    "caption_delta": float(np.abs(logits - text_logits).mean()),
