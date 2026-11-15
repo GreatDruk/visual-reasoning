@@ -1,0 +1,31 @@
+# @package _global_
+# Frozen SigLIP2 patch tokens (cached once) + GRU + joint self-attention head.
+# Cheap epochs -> constant LR and a long schedule instead of the 7-epoch FiLM run.
+defaults:
+  - override /model/image_encoder: siglip2_b16
+  - override /model/text_encoder: gru
+  - override /model/fusion: transformer
+  - override /loss: bce_pair
+
+data:
+  normalize: siglip
+  image_size: [256, 384]
+
+model:
+  fusion:
+    max_cells: [8, 12]
+    input_pool: 2                 # 16x24 patch grid -> 8x12 cells: 1.08 -> 0.17 s/step on MPS
+    readout: mlp
+
+train:
+  epochs: 40
+  batch_size: 128
+  optimizer:
+    lr: 3.0e-4
+    weight_decay: 0.05
+  scheduler:
+    name: constant
+    warmup_steps: 500
+  early_stopping:
+    monitor: val_auc
+    patience: 8

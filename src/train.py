@@ -128,18 +128,30 @@ def main(cfg):
     cache_start = time.time()
     encoder, in_channels, image_mode = _attach_sources(cfg, splits, device, need_flip)
     cache_min = (time.time() - cache_start) / 60
+    if cfg.data.get("categories"):
+        # Category routing (category is a given column in every split, test included).
+        # Filtered after attaching sources, so feature caches always cover the full split.
+        keep = list(cfg.data.categories)
+        splits = {s: subset(sp, np.isin(sp.categories, keep)) for s, sp in splits.items()}
+        for name, split in splits.items():
+            if not len(split):
+                raise ValueError(f"{name}: empty split after data.categories={keep}")
 
     train_split = splits["train"]
     if cfg.data.train_on_val:
         train_split = concat_splits(splits["train"], splits["val"], "train_val")
 
-    # Vocabulary from the labelled training captions (and their rewrites) only.
-    vocab_captions = list(train_split.captions)
-    if cfg.aug.text.reorder_clauses_p > 0:
-        vocab_captions += [p for c, cat in zip(train_split.captions, train_split.categories) for p in paraphrases(c, cat)]
-    vocab = Vocab(vocab_captions, lowercase=cfg.model.text_encoder.get("lowercase", True))
+    if cfg.model.text_encoder._target_ == "src.models.text_encoders.ClipTextEncoder":
+        text_encoder = instantiate(cfg.model.text_encoder)
+        vocab = text_encoder.tokenizer  # fixed pretrained vocabulary; no caption fitting
+    else:
+        # Vocabulary from the labelled training captions (and their rewrites) only.
+        vocab_captions = list(train_split.captions)
+        if cfg.aug.text.reorder_clauses_p > 0:
+            vocab_captions += [p for c, cat in zip(train_split.captions, train_split.categories) for p in paraphrases(c, cat)]
+        vocab = Vocab(vocab_captions, lowercase=cfg.model.text_encoder.get("lowercase", True))
 
-    text_encoder = instantiate(cfg.model.text_encoder, vocab_size=len(vocab))
+        text_encoder = instantiate(cfg.model.text_encoder, vocab_size=len(vocab))
     fusion = instantiate(cfg.model.fusion, in_channels=in_channels, text_dim=text_encoder.out_dim, _convert_="all")
     spatial = cfg.model.image_encoder.spatial or cfg.model.fusion.requires_spatial
     model = VisualReasoningModel(text_encoder, fusion, image_encoder=encoder, spatial=spatial)
@@ -183,7 +195,7 @@ def main(cfg):
 
     results = {
         "name_exp": cfg.name_exp, "seed": cfg.seed,
-        "architecture": f"{cfg.model.image_encoder.arch}/{type(text_encoder).__name__}/{type(fusion).__name__}",
+        "architecture": f"{cfg.model.image_encoder.get('arch') or cfg.model.image_encoder.model_name}/{type(text_encoder).__name__}/{type(fusion).__name__}",
         "epochs_run": len(history), "best_epoch": trainer.best_epoch,
         "stop_reason": trainer.stop_reason,
         "device": str(device), "python_version": platform.python_version(),
