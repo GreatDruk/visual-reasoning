@@ -1,0 +1,38 @@
+# @package _global_
+# Train-only development preset; val remains held out, test is not read.
+defaults:
+  - override /model/image_encoder: resnet50
+  - override /model/text_encoder: gru
+  - override /model/fusion: pair_choice
+  - override /loss: bce_pair
+  - override /aug: none
+
+seed: 42
+name_exp: debug_pair_choice
+save_config: false
+data:
+  train_on_val: false
+  canonicalize: true
+  image_size: [160, 240]
+  normalize: imagenet
+model:
+  text_encoder:
+    embed_dim: 128
+    hidden_dim: 128
+train:
+  epochs: 25
+  batch_size: 128
+  pair_sampler: true
+  optimizer:
+    lr: 5.0e-4
+    weight_decay: 0.01
+  early_stopping:
+    monitor: val_auc
+    patience: 5
+  time_budget_min: 14
+  predict_test: false
+  eval:
+    train: false
+    holdout: true
+  postprocess:
+    twin_normalize: true

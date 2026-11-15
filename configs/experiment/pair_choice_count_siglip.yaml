@@ -1,0 +1,26 @@
+# @package _global_
+# Frozen block-8 baseline + train-only count distribution; val held out, no test read.
+defaults:
+  - pair_choice_siglip
+  - override /model/fusion: pair_count_choice
+
+name_exp: debug_pair_count_siglip
+save_config: false
+model:
+  init_from: debug_pair_D_block8
+  image_encoder:
+    out_layer: 8
+  fusion:
+    input_pool: null
+train:
+  epochs: 25
+  time_budget_min: 14
+  eval:
+    # Canonicalization makes val_para identical to val; avoid duplicate CPU inference.
+    paraphrases: false
+  optimizer:
+    lr: 0.001
+    weight_decay: 0.01
+  early_stopping:
+    monitor: val_auc
+    patience: 6
