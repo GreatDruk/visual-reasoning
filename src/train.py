@@ -13,10 +13,11 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate as _instantiate
 from omegaconf import OmegaConf
 
-from .data import ArraySource, canonicalized, concat_splits, load_split, paraphrased, sample_pairs_by_category, save_submission, subset
+from .data import ArraySource, canonicalized, concat_splits, load_split, pair_groups, paraphrased, sample_pairs_by_category, save_submission, subset
 from .features import cache_features, cache_key, load_images
 from .metrics import evaluate_scores
 from .models.model import VisualReasoningModel
+from .models.count_distribution import parse_count_caption
 from .models.text_encoders import Vocab
 from .text_aug import paraphrases
 from .training import Trainer
@@ -115,6 +116,10 @@ def _warm_start(model, name_exp):
     src = torch.load(runs[-1], map_location="cpu")
     own = model.state_dict()
     copied = {k: v for k, v in src.items() if k in own and own[k].shape == v.shape}
+    if getattr(model.fusion, "freeze_base", False):
+        missing = [k for k in own if "fusion.count_distribution." not in k and k not in copied]
+        if missing:
+            raise ValueError(f"frozen count model needs a complete compatible baseline; missing tensors: {missing}")
     own.update(copied)
     model.load_state_dict(own)
     log.info(f"warm start from {runs[-1]}: {len(copied)}/{len(own)} tensors copied")
@@ -206,6 +211,14 @@ def main(cfg):
     model = VisualReasoningModel(text_encoder, fusion, image_encoder=encoder, spatial=spatial)
     if cfg.model.get("init_from"):
         _warm_start(model, cfg.model.init_from)
+    elif getattr(fusion, "freeze_base", False):
+        raise ValueError("freeze_base=true requires model.init_from with a trained pair-choice checkpoint")
+    if getattr(fusion, "train_count_only", False):
+        count_rows = np.array([parse_count_caption(c) is not None for c in train_split.captions])
+        if not count_rows.any() or not np.all(count_rows[pair_groups(train_split)].sum(1) % 2 == 0):
+            raise ValueError("count-only training requires complete exactly-N twin pairs")
+        train_split = subset(train_split, count_rows)
+        log.info(f"frozen base; training count branch on {len(train_split)} exactly-N rows only")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"trainable params: {n_params / 1e6:.2f}M, vocab {len(vocab)}, in_channels {in_channels}")
 
@@ -225,7 +238,9 @@ def main(cfg):
     if cfg.train.eval.train:
         eval_splits["train_fit"] = train_split
     if cfg.train.eval.holdout and not cfg.data.train_on_val:
-        eval_splits.update({"val": splits["val"], "val_para": prep(paraphrased(splits["val"]))})
+        eval_splits["val"] = splits["val"]
+        if cfg.train.eval.get("paraphrases", True):
+            eval_splits["val_para"] = prep(paraphrased(splits["val"]))
     if cfg.train.early_stopping is not None:
         available = set()
         for name, split in eval_splits.items():

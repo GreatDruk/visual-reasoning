@@ -17,8 +17,21 @@ class VisualReasoningModel(nn.Module):
         self.fusion = fusion
         self.spatial = spatial
         self.requires_pairs = getattr(fusion, "requires_pairs", False)
+        self.requires_count_inputs = getattr(fusion, "requires_count_inputs", False)
+        if getattr(fusion, "freeze_base", False):
+            self.text_encoder.requires_grad_(False)
+            if self.image_encoder is not None:
+                self.image_encoder.requires_grad_(False)
 
-    def forward(self, image, tokens, lengths, twin_index=None, difference_mask=None):
+    def train(self, mode=True):
+        super().train(mode)
+        if getattr(self.fusion, "freeze_base", False):
+            self.text_encoder.eval()
+            if self.image_encoder is not None:
+                self.image_encoder.eval()
+        return self
+
+    def forward(self, image, tokens, lengths, twin_index=None, difference_mask=None, count_inputs=None):
         if self.requires_pairs:
             if twin_index is None or difference_mask is None:
                 raise ValueError("pair-choice fusion requires twin_index and difference_mask")
@@ -29,6 +42,14 @@ class VisualReasoningModel(nn.Module):
         if not self.spatial and image.dim() == 4:
             image = image.mean(dim=(2, 3))
         text = self.text_encoder(tokens, lengths)
+        if self.requires_count_inputs:
+            count_text = None
+            if count_inputs is not None:
+                ci = count_inputs
+                filters = self.text_encoder(ci["filter_tokens"], ci["filter_lengths"])
+                references = self.text_encoder(ci["reference_tokens"], ci["reference_lengths"])
+                count_text = (ci["rows"], ci["numbers"], ci["relations"], filters, references)
+            return self.fusion(image, text, twin_index, difference_mask, count_text=count_text)
         if self.requires_pairs:
             return self.fusion(image, text, twin_index, difference_mask)
         return self.fusion(image, text)

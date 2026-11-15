@@ -15,6 +15,7 @@ from .diagnostics import TrainingDiagnostics
 from .features import preprocess
 from .metrics import evaluate_scores
 from .models.pair_choice import token_difference_mask
+from .models.count_distribution import encode_count_inputs
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,8 @@ class Trainer:
             pairs = batch["twin_index"]
             pair_kwargs = {"twin_index": pairs,
                            "difference_mask": token_difference_mask(tokens, lengths, pairs).to(self.device)}
+        if getattr(self.model, "requires_count_inputs", False):
+            pair_kwargs["count_inputs"] = encode_count_inputs(batch["captions"], self.vocab, self.device)
         with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
             return self.model(x, tokens, lengths, **pair_kwargs).float()
 
@@ -227,6 +230,8 @@ class Trainer:
                         batch["labels"].to(self.device),
                         pair_index.to(self.device) if pair_index is not None else None,
                     )
+                    if getattr(self.model, "requires_count_inputs", False):
+                        loss = loss + self.model.fusion.auxiliary_loss(batch["labels"].to(self.device))
                     opt.zero_grad(set_to_none=True)
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
@@ -293,7 +298,9 @@ class Trainer:
             log.info(" | ".join(
                 f"{k} {v:.3e}" if k.startswith("lr/") else
                 f"{k} {v:.4f}" if isinstance(v, float) else f"{k} {v}"
-                for k, v in row.items() if "_auc/" not in k
+                for k, v in row.items() if "_auc/" not in k or (
+                    getattr(self.model, "requires_count_inputs", False)
+                    and k in ("val_auc/counting", "val_auc/spatial_counting"))
             ))
 
             score = row[monitor] if es is not None else (-row["loss"] if losses else -np.inf)
