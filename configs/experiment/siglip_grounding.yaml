@@ -1,0 +1,24 @@
+# @package _global_
+# Frozen SigLIP2 patch tokens (cached) + GRU + GroundingHead (direct word-query -> cell attention).
+defaults:
+  - override /model/image_encoder: siglip2_b16
+  - override /model/text_encoder: gru
+  - override /model/fusion: grounding
+  - override /loss: bce_pair
+
+data:
+  normalize: siglip
+  image_size: [256, 384]
+
+train:
+  epochs: 40
+  batch_size: 128
+  optimizer:
+    lr: 3.0e-4
+    weight_decay: 0.05
+  scheduler:
+    name: constant
+    warmup_steps: 500
+  early_stopping:
+    monitor: val_auc
+    patience: 8

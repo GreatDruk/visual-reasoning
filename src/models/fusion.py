@@ -405,6 +405,48 @@ class TransformerHead(nn.Module):
         return self.readout(self.norm(x[:, 0]), text[0])
 
 
+class GroundingHead(nn.Module):
+    """Word queries that attend directly to feature-map cells (no cell self-attention).
+
+    Words are pooled into `queries` text queries (learned soft word selection plus a
+    sentence term); each query takes a softmax over cells (1x1 projection + learned and
+    coordinate position embeddings) by dot product. The readout sees the attended cell
+    summary z, the query q and z * q, so a multiplicative text-image interaction reaches
+    the logit from the first step. TransformerHead buries that interaction under joint
+    self-attention and sat at chance for ~3800 steps; this head has no such plateau
+    (CPU research on cached SigLIP2 maps, scripts/codex_cpu_research.py).
+    """
+
+    def __init__(self, in_channels, text_dim, dim=256, queries=4, hidden=128, dropout=0.1,
+                 max_cells=(8, 12), input_pool=None, requires_spatial=True):
+        super().__init__()
+        self.dim, self.queries, self.input_pool = dim, queries, input_pool
+        self.cell = nn.Sequential(nn.Conv2d(in_channels, dim, 1), nn.BatchNorm2d(dim))
+        self.pos = nn.Parameter(torch.randn(1, dim, *max_cells) * 0.02)
+        self.xy = nn.Linear(2, dim, bias=False)
+        self.word_att = nn.Linear(text_dim, queries)
+        self.word_q = nn.Linear(text_dim, dim)
+        self.sent_q = nn.Linear(text_dim, queries * dim)
+        self.q_norm = nn.LayerNorm(dim)
+        self.bias = nn.Linear(text_dim, queries)
+        self.out = nn.Sequential(nn.Linear(queries * dim * 3, hidden), nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, 1))
+
+    def forward(self, image, text):
+        sent, words, mask = text
+        if self.input_pool:
+            image = F.avg_pool2d(image, self.input_pool)
+        cells = self.cell(image)
+        h, w = cells.shape[-2:]
+        pos = self.pos if self.pos.shape[-2:] == (h, w) else F.interpolate(self.pos, size=(h, w), mode="bilinear", align_corners=False)
+        k = (cells + pos).flatten(2).transpose(1, 2) + self.xy(coord_map(cells[:1]).flatten(2).transpose(1, 2))
+        att = self.word_att(words).masked_fill(~mask[..., None], -1e4).softmax(1)
+        q = self.word_q(torch.einsum("blk,bld->bkd", att, words))
+        q = self.q_norm(q + self.sent_q(sent).view(-1, self.queries, self.dim))
+        scores = torch.einsum("bkd,bnd->bkn", q, k) / math.sqrt(self.dim) + self.bias(sent)[..., None]
+        z = torch.einsum("bkn,bnd->bkd", scores.softmax(-1), k)
+        return self.out(torch.cat([z.flatten(1), q.flatten(1), (z * q).flatten(1)], -1)).squeeze(-1)
+
+
 class QueryHead(nn.Module):
     """Text-conditioned probes over feature-map cells, with relational read-outs.
 
