@@ -150,6 +150,16 @@ def main(cfg):
         if cfg.aug.text.reorder_clauses_p > 0:
             vocab_captions += [p for c, cat in zip(train_split.captions, train_split.categories) for p in paraphrases(c, cat)]
         vocab = Vocab(vocab_captions, lowercase=cfg.model.text_encoder.get("lowercase", True))
+        if cfg.model.get("init_from"):
+            # Reuse the source run's (train-only) vocabulary so word embeddings line up
+            # for the warm start even when data.categories narrows the captions.
+            runs = sorted(resolve_path(f"artefacts/hydra/{cfg.model.init_from}").glob("*/vocab.json"))
+            if runs:
+                saved = json.loads(runs[-1].read_text())
+                vocab.itos = saved["itos"]
+                vocab.stoi = {w: i for i, w in enumerate(vocab.itos)}
+                vocab.lowercase = saved["lowercase"]
+                log.info(f"vocab from {runs[-1]} ({len(vocab)} entries)")
 
         text_encoder = instantiate(cfg.model.text_encoder, vocab_size=len(vocab))
     fusion = instantiate(cfg.model.fusion, in_channels=in_channels, text_dim=text_encoder.out_dim, _convert_="all")
