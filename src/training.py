@@ -14,6 +14,7 @@ from .data import eval_batches, train_batches
 from .diagnostics import TrainingDiagnostics
 from .features import preprocess
 from .metrics import evaluate_scores
+from .models.pair_choice import token_difference_mask
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,8 @@ class Trainer:
         self.stop_reason = "epochs"
         self.optimizer_steps = 0  # actual optimizer updates (a GradScaler skip is not a step)
         self.processed_rows = 0   # training rows consumed by the updates of one fit
+        if getattr(model, "requires_pairs", False) and not train_cfg.pair_sampler:
+            raise ValueError("pair-choice fusion requires train.pair_sampler=true")
 
     def _make_optimizer(self):
         """Partition trainable tensors by encoder identity, without duplicate ownership."""
@@ -80,8 +83,13 @@ class Trainer:
 
     def _forward(self, split, batch):
         x, tokens, lengths = self._inputs(split, batch)
+        pair_kwargs = {}
+        if getattr(self.model, "requires_pairs", False):
+            pairs = batch["twin_index"]
+            pair_kwargs = {"twin_index": pairs,
+                           "difference_mask": token_difference_mask(tokens, lengths, pairs).to(self.device)}
         with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
-            return self.model(x, tokens, lengths).float()
+            return self.model(x, tokens, lengths, **pair_kwargs).float()
 
     @torch.no_grad()
     def predict(self, split, batch_size=None):
@@ -89,8 +97,10 @@ class Trainer:
         if batch_size is None:
             batch_size = self.cfg.batch_size
         self.model.eval()
-        out = [self._forward(split, b).cpu().numpy() for b in eval_batches(split, batch_size)]
-        return np.concatenate(out)
+        out = np.empty(len(split), dtype=np.float32)
+        for batch in eval_batches(split, batch_size, pairwise=getattr(self.model, "requires_pairs", False)):
+            out[batch["rows"]] = self._forward(split, batch).cpu().numpy()
+        return out
 
     def evaluate(self, split):
         logits = self.predict(split)

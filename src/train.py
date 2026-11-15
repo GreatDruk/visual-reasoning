@@ -45,6 +45,41 @@ def _archive_config(cfg):
 def _attach_sources(cfg, splits, device, need_flip):
     """Give each split an image source: cached feature maps or raw images."""
     enc_cfg = cfg.model.image_encoder
+    # A complete cache needs no encoder construction or pretrained-weight download.
+    # Name-indexed views also let data.limit reuse a full read-only cache safely.
+    if cfg.train.cache_features and enc_cfg.freeze and not enc_cfg.get("unfreeze_last_n_blocks", 0):
+        base = resolve_path(cfg.paths.features_dir) / cache_key(enc_cfg, cfg.data)
+        sources = {}
+        channels = set()
+        for name, split in splits.items():
+            path = base / f"{name}.npy"
+            names_path = path.with_suffix(".json")
+            flip_path = base / f"{name}_flip.npy"
+            flip_names = flip_path.with_suffix(".json")
+            use_flip = need_flip and name in ("train", "val")
+            if not path.exists() or not names_path.exists():
+                break
+            cached_names = json.loads(names_path.read_text())
+            if use_flip and (not flip_path.exists() or not flip_names.exists()
+                             or json.loads(flip_names.read_text()) != cached_names):
+                break
+            positions = {n: i for i, n in enumerate(cached_names)}
+            if not all(n in positions for n in split.image_names):
+                break
+            arr = np.load(path, mmap_mode="r")
+            flipped = np.load(flip_path, mmap_mode="r") if use_flip else None
+            if arr.ndim != 4 or len(arr) != len(cached_names) or (use_flip and flipped.shape != arr.shape):
+                raise ValueError(f"invalid spatial feature cache: {path}")
+            indices = None if cached_names == split.image_names else np.array([positions[n] for n in split.image_names])
+            sources[name] = ArraySource(arr, flipped, indices)
+            channels.add(arr.shape[1])
+        if len(sources) == len(splits):
+            if len(channels) != 1:
+                raise ValueError("feature caches have inconsistent channel counts")
+            for name, source in sources.items():
+                splits[name].source = source
+            log.info("reusing frozen feature caches without constructing the image encoder")
+            return None, channels.pop(), "features"
     encoder = instantiate(enc_cfg)
     cached = cfg.train.cache_features and not encoder.trainable
     image_dirs = {"train": cfg.data.train_images, "val": cfg.data.val_images, "test": cfg.data.test_images}

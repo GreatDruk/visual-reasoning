@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - pair_choice
+  - override /model/image_encoder: siglip2_b16
+
+name_exp: debug_pair_choice_siglip
+data:
+  image_size: [256, 384]
+  normalize: siglip
+model:
+  fusion:
+    input_pool: 2

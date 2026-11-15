@@ -1,9 +1,11 @@
 """Fusion heads: combine image features and caption encoding into one truth logit.
 
-Every head has the signature forward(image, text) -> logits [B], where `image` is a
+Single-caption heads have the signature forward(image, text) -> logits [B], where `image` is a
 feature map [B, C, H, W] (or a vector [B, C] for non-spatial heads) and `text` is the
 tuple (sentence [B, D], token_states [B, L, D], mask [B, L]) from a text encoder.
 `requires_spatial` tells the model whether the encoder must keep the spatial map.
+PairChoiceHead additionally takes unoriented twin indices and token-difference masks;
+VisualReasoningModel dispatches that contract when the head declares requires_pairs.
 """
 
 import math
@@ -11,6 +13,8 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+from .pair_choice import PairChoiceHead  # Hydra fusion target, alongside single-caption heads
 
 
 def coord_map(x):

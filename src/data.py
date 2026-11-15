@@ -8,6 +8,7 @@ import torch
 
 from .text_aug import canonical_form, novel_form, paraphrases, swap_left_right
 from .utils import resolve_path
+from .twins import find_twins
 
 
 @dataclass
@@ -105,13 +106,16 @@ class ArraySource:
     """Per-image arrays (cached float16 feature maps, or uint8 images) with an optional
     pre-flipped copy for horizontal-flip augmentation."""
 
-    def __init__(self, array, flipped=None):
+    def __init__(self, array, flipped=None, indices=None):
         self.array, self.flipped = array, flipped
+        self.indices = indices
 
     def __len__(self):
-        return len(self.array)
+        return len(self.array) if self.indices is None else len(self.indices)
 
     def get(self, idx, flip=None):
+        if self.indices is not None:
+            idx = self.indices[idx]
         out = np.asarray(self.array[idx])
         if flip is not None and flip.any():
             if self.flipped is None:
@@ -220,6 +224,8 @@ def train_batches(split, batch_size, rng, aug, pair_sampler=True):
             "labels": torch.from_numpy(split.labels[rows]),
         }
         if pair_sampler:
+            # Model pairing is deliberately independent of the true/false loss order.
+            batch["twin_index"] = torch.arange(len(rows)).reshape(-1, 2)
             lab = split.labels[rows].reshape(g, k)
             base = np.arange(g) * 2
             true_pos = base + np.argmax(lab, axis=1)
@@ -228,7 +234,22 @@ def train_batches(split, batch_size, rng, aug, pair_sampler=True):
         yield batch
 
 
-def eval_batches(split, batch_size):
+def eval_batches(split, batch_size, pairwise=False):
+    if pairwise:
+        if batch_size < 2 or batch_size % 2:
+            raise ValueError("pair-choice evaluation requires an even batch_size >= 2")
+        names = [split.image_names[i] for i in split.img_idx]
+        # Use precisely the metadata available at test time, never labels/pair_ids.
+        pairs = find_twins(names, split.captions, split.categories)
+        if not np.array_equal(np.sort(pairs.flatten()), np.arange(len(split))):
+            raise ValueError(f"{split.name}: pair-choice inference needs a twin for every row")
+        for i in range(0, len(pairs), batch_size // 2):
+            rows = pairs[i:i + batch_size // 2].flatten()
+            yield {"rows": rows, "img_idx": split.img_idx[rows],
+                   "flip": np.zeros(len(rows), bool),
+                   "captions": [split.captions[r] for r in rows],
+                   "twin_index": torch.arange(len(rows)).reshape(-1, 2)}
+        return
     for i in range(0, len(split), batch_size):
         rows = np.arange(i, min(i + batch_size, len(split)))
         yield {
