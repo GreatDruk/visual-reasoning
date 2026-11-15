@@ -193,6 +193,7 @@ def main(argv=None):
     p.add_argument("--count-weight", type=float, default=0., help="smooth-L1 weight on exact TRAIN object counts")
     p.add_argument("--bound-weight", type=float, default=0., help="squared-hinge weight on TRAIN lower bounds")
     p.add_argument("--count-batch", type=int, default=12, help="labelled images per batch")
+    p.add_argument("--count-warmup", type=int, default=0, help="steps of linear ramp-in for the count losses")
     p.add_argument("--count-threshold", type=float, default=.5)
     p.add_argument("--count-sharpness", type=float, default=10.)
     args = p.parse_args(argv)
@@ -264,7 +265,8 @@ def main(argv=None):
             count = model.object_count(result["attn"][:len(targets)].float())
             exact, bound = targets[:, 0], targets[:, 1]
             has = torch.isfinite(exact)
-            count_loss = (args.count_weight * F.smooth_l1_loss(count[has], exact[has], reduction="sum")
+            ramp = min(1., step / args.count_warmup) if args.count_warmup else 1.
+            count_loss = ramp * (args.count_weight * F.smooth_l1_loss(count[has], exact[has], reduction="sum")
                           + args.bound_weight * F.relu(bound - count).square().sum()) / len(targets)
             loss = loss + count_loss
             count_losses.append(count_loss.item())
