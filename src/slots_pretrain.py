@@ -1,7 +1,10 @@
 """Unsupervised slot-autoencoder pretraining on cached frozen features.
 
 Uses every cached image of train, val and test (plus the cached horizontal flips of
-train/val) and no captions or labels: the only objective is token reconstruction.
+train/val) for token reconstruction. Optionally (`--count-weight > 0`) a second
+objective uses TRAIN labels only: true "exactly N objects" captions fix the number of
+objects, other true count / binding captions give lower bounds, and the soft number of
+occupied object slots is pulled to them. Val labels only feed a logged diagnostic.
 
     uv run python -m src.slots_pretrain --features-dir <dir> --out artefacts/slots/v1
 """
@@ -17,7 +20,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .models.slots import SlotAutoencoder
+import torch.nn.functional as F
+
+from .data import canonicalized, load_split
+from .models.slot_program import AND, EXACT, parse_program
+from .models.slots import SlotAutoencoder, expand_slot_state
 from .utils import get_device, resolve_path, set_seed
 
 log = logging.getLogger(__name__)
@@ -36,26 +43,69 @@ def open_caches(base, splits=SPLITS):
     return arrays
 
 
-class Sampler:
-    """Uniform random images over the union of caches, read from memmaps in a thread."""
+def count_targets(split):
+    """image name -> (exact object count or nan, lower bound), from true captions only.
 
-    def __init__(self, arrays, batch_size, seed):
+    Exact: "exactly N objects" (no filter, no relation). Lower bounds: a true exactly-N
+    caption with any filter implies >= N objects (+1 for its relation reference); a
+    true binding caption names two different objects.
+    """
+    exact, bound = {}, {}
+    for img, caption, label in zip(split.img_idx, split.captions, split.labels):
+        p = parse_program(caption)
+        if label != 1 or p is None:
+            continue
+        name = split.image_names[img]
+        if p.op == EXACT:
+            if not p.a and not p.relation:
+                exact[name] = p.number
+            bound[name] = max(bound.get(name, 0), p.number + (1 if p.relation else 0))
+        elif p.op == AND:
+            bound[name] = max(bound.get(name, 0), 2)
+    return {n: (float(exact.get(n, np.nan)), float(b)) for n, b in bound.items() if b > 0 or n in exact}
+
+
+class Sampler:
+    """Random images over the union of caches, read from memmaps in a thread.
+
+    With `labelled` = (global indices, targets [M, 2]), every batch starts with
+    `count_batch` labelled images; the rest are uniform over all caches.
+    """
+
+    def __init__(self, arrays, batch_size, seed, labelled=None, count_batch=0):
         self.arrays = list(arrays.values())
         self.sizes = np.array([len(a) for a in self.arrays])
         self.offsets = np.concatenate([[0], np.cumsum(self.sizes)])
         self.batch_size = batch_size
+        self.labelled = labelled
+        self.count_batch = count_batch if labelled is not None else 0
         self.rng = np.random.default_rng(seed)
         self.pool = ThreadPoolExecutor(1)
         self.pending = self.pool.submit(self._read)
 
-    def _read(self):
-        idx = np.sort(self.rng.choice(self.offsets[-1], self.batch_size, replace=False))
-        parts = []
+    def _gather(self, idx):
+        out = np.empty((len(idx), *self.arrays[0].shape[1:]), dtype=self.arrays[0].dtype)
         for k, a in enumerate(self.arrays):
-            local = idx[(idx >= self.offsets[k]) & (idx < self.offsets[k + 1])] - self.offsets[k]
-            if len(local):
-                parts.append(np.asarray(a[local]))
-        return torch.from_numpy(np.concatenate(parts))
+            m = (idx >= self.offsets[k]) & (idx < self.offsets[k + 1])
+            if m.any():
+                local = idx[m] - self.offsets[k]
+                order = np.argsort(local)
+                rows = np.nonzero(m)[0][order]
+                out[rows] = np.asarray(a[local[order]])
+        return out
+
+    def _read(self):
+        targets = None
+        idx = self.rng.choice(self.offsets[-1], self.batch_size - self.count_batch, replace=False)
+        if self.count_batch:
+            # Exact totals are ~10% of labelled rows: draw them for half of the slots.
+            exact = np.isfinite(self.labelled[1][:, 0])
+            weight = np.where(exact, .5 / max(exact.sum(), 1), .5 / max((~exact).sum(), 1))
+            chosen = self.rng.choice(len(self.labelled[0]), self.count_batch, replace=False, p=weight / weight.sum())
+            idx = np.concatenate([self.labelled[0][chosen], idx])
+            targets = torch.from_numpy(self.labelled[1][chosen])
+        x = torch.from_numpy(self._gather(idx))
+        return x if targets is None else (x, targets)
 
     def next(self):
         batch = self.pending.result()
@@ -104,6 +154,19 @@ def mask_overlays(model, features, image_paths, out_path, device):
     plt.close(fig)
 
 
+@torch.no_grad()
+def count_diagnostic(model, features, truth, device):
+    """Val-only evaluation of the slot count (labels never reach a loss)."""
+    model.eval()
+    enc = model.encode(features.to(device))
+    soft = model.object_count(enc["attn"]).cpu().numpy()
+    hard = (enc["attn"][:, model.object_slots].amax(-1) > model.count_threshold).sum(-1).cpu().numpy()
+    return {"val_count_mae": round(float(np.abs(soft - truth).mean()), 3),
+            "val_count_exact": round(float((hard == truth).mean()), 3),
+            "val_count_bias": round(float((hard - truth).mean()), 3),
+            "val_count_mae_8plus": round(float(np.abs(hard - truth)[truth >= 8].mean()), 3)}
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--features-dir", default="artefacts/features")
@@ -125,6 +188,13 @@ def main(argv=None):
     p.add_argument("--device", default="auto")
     p.add_argument("--log-every", type=int, default=250)
     p.add_argument("--splits", default=",".join(SPLITS))
+    p.add_argument("--init", default=None, help="slot_autoencoder.pt to continue from (K may grow)")
+    p.add_argument("--background-slots", default="", help="comma-separated slot indices excluded from the count")
+    p.add_argument("--count-weight", type=float, default=0., help="smooth-L1 weight on exact TRAIN object counts")
+    p.add_argument("--bound-weight", type=float, default=0., help="squared-hinge weight on TRAIN lower bounds")
+    p.add_argument("--count-batch", type=int, default=12, help="labelled images per batch")
+    p.add_argument("--count-threshold", type=float, default=.5)
+    p.add_argument("--count-sharpness", type=float, default=10.)
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
@@ -136,34 +206,83 @@ def main(argv=None):
     arrays = open_caches(base, args.splits.split(","))
     log.info("caches: " + ", ".join(f"{k} {v.shape}" for k, v in arrays.items()))
     first = next(iter(arrays.values()))
-    model = SlotAutoencoder(first.shape[1], first.shape[2:], args.slots, args.slot_dim, args.input_dim,
-                            args.iterations, args.decoder_hidden, args.decoder_layers,
-                            args.target_dim or None)
-    rng = np.random.default_rng(args.seed)
-    sample = np.asarray(first[np.sort(rng.choice(len(first), 256, replace=False))])
-    model.fit_normalization(torch.from_numpy(sample))
+    background = tuple(int(k) for k in args.background_slots.split(",") if k)
+    if args.init:
+        payload = torch.load(resolve_path(args.init), map_location="cpu")
+        config = {**payload["config"], "num_slots": args.slots, "background_slots": background,
+                  "count_threshold": args.count_threshold, "count_sharpness": args.count_sharpness}
+        model = SlotAutoencoder(**config)
+        model.load_state_dict(expand_slot_state(payload["state_dict"], args.slots,
+                                                torch.Generator().manual_seed(args.seed)))
+        log.info(f"continued from {args.init}: {len(payload['state_dict']['slot_attention.queries'])} -> {args.slots} slots")
+    else:
+        model = SlotAutoencoder(first.shape[1], first.shape[2:], args.slots, args.slot_dim, args.input_dim,
+                                args.iterations, args.decoder_hidden, args.decoder_layers,
+                                args.target_dim or None, background, args.count_threshold, args.count_sharpness)
+        rng = np.random.default_rng(args.seed)
+        sample = np.asarray(first[np.sort(rng.choice(len(first), 256, replace=False))])
+        model.fit_normalization(torch.from_numpy(sample))
     model.to(device)
+    counting = args.count_weight > 0 or args.bound_weight > 0
+    labelled, val_counts = None, None
+    if counting:
+        names = list(arrays)
+        offsets = np.concatenate([[0], np.cumsum([len(arrays[n]) for n in names])])
+        targets = count_targets(canonicalized(load_split("train", resolve_path("data/train.csv"))))
+        train_names = json.loads((base / "train.json").read_text())
+        idx, tgt = [], []
+        for cache in ("train", "train_flip"):  # a flip keeps the object count
+            if cache in arrays:
+                for i, n in enumerate(train_names):
+                    if n in targets:
+                        idx.append(offsets[names.index(cache)] + i)
+                        tgt.append(targets[n])
+        labelled = (np.array(idx), np.array(tgt, dtype=np.float32))
+        log.info(f"count targets: {len(targets)} train images "
+                 f"({int(np.isfinite(labelled[1][:, 0]).sum())} exact rows incl. flips), {len(idx)} rows")
+        if "val" in arrays:
+            from .slot_inspect import object_counts
+            vc = object_counts(canonicalized(load_split("val", resolve_path("data/val.csv"))))
+            val_names = json.loads((base / "val.json").read_text())
+            rows = [i for i, n in enumerate(val_names) if n in vc]
+            val_counts = (torch.from_numpy(np.array(arrays["val"][rows])), np.array([vc[val_names[i]] for i in rows]))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1, (s + 1) / args.warmup)
                                               * .5 * (1 + math.cos(math.pi * min(s, args.steps) / args.steps)))
-    sampler = Sampler(arrays, args.batch_size, args.seed)
-    history, losses, t0 = [], [], time.time()
+    sampler = Sampler(arrays, args.batch_size, args.seed, labelled, args.count_batch)
+    history, losses, count_losses, t0 = [], [], [], time.time()
     for step in range(1, args.steps + 1):
         model.train()
-        x = sampler.next().to(device)
+        batch = sampler.next()
+        x, targets = batch if counting else (batch, None)
+        x = x.to(device)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bool(args.amp) and device.type != "cpu"):
-            loss = model(x)["loss"]
+            result = model(x)
+        loss = result["loss"]
+        if counting:
+            targets = targets.to(device)
+            count = model.object_count(result["attn"][:len(targets)].float())
+            exact, bound = targets[:, 0], targets[:, 1]
+            has = torch.isfinite(exact)
+            count_loss = (args.count_weight * F.smooth_l1_loss(count[has], exact[has], reduction="sum")
+                          + args.bound_weight * F.relu(bound - count).square().sum()) / len(targets)
+            loss = loss + count_loss
+            count_losses.append(count_loss.item())
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         sched.step()
-        losses.append(loss.item())
+        losses.append(result["loss"].item())
         if step % args.log_every == 0 or step == args.steps:
             row = {"step": step, "loss": float(np.mean(losses)), "lr": sched.get_last_lr()[0],
                    "min": round((time.time() - t0) / 60, 2)}
+            if counting:
+                row["count_loss"] = float(np.mean(count_losses))
+                if val_counts is not None:
+                    row.update(count_diagnostic(model, *val_counts, device))
             history.append(row)
-            losses = []
+            losses, count_losses = [], []
             log.info(json.dumps(row))
         if step % 4000 == 0:
             save_checkpoint(model, out / "slot_autoencoder.pt", {"args": vars(args), "history": history})

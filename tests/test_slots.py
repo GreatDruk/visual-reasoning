@@ -203,3 +203,58 @@ class TestSlotHead(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCountSupervision(unittest.TestCase):
+    def test_count_targets_use_true_captions_only(self):
+        from src.slots_pretrain import count_targets
+        captions = ["exactly four objects", "exactly five objects",          # img 0: exact 4
+                    "exactly three cubes", "exactly two cubes",              # img 1: >= 3
+                    "there are exactly two spheres behind the red cube", "there are exactly three spheres behind the red cube",
+                    "a red cube and a blue sphere", "a blue cube and a red sphere",
+                    "a red cube", "a blue cube"]                           # img 4: nothing
+        split = Split("train", np.arange(10), [f"{i}.jpg" for i in range(5)], np.repeat(np.arange(5), 2),
+                      captions, np.repeat(["counting"] * 3 + ["binding", "attribute"], 2),
+                      np.array([1, 0, 1, 0, 0, 1, 1, 0, 1, 0]), np.repeat(np.arange(5), 2))
+        targets = count_targets(split)
+        self.assertEqual(targets["0.jpg"], (4., 4.))
+        self.assertTrue(np.isnan(targets["1.jpg"][0]) and targets["1.jpg"][1] == 3.)
+        self.assertEqual(targets["2.jpg"][1], 4.)  # three spheres + their reference
+        self.assertEqual(targets["3.jpg"][1], 2.)
+        self.assertNotIn("4.jpg", targets)
+
+    def test_object_count_ignores_background_and_empty_slots(self):
+        model = SlotAutoencoder(6, background_slots=(0,), count_sharpness=50., **SLOT_CONFIG)
+        attn = torch.full((1, 4, 15), .02)
+        attn[0, 0, :8] = .97   # background owns tokens: never counted
+        attn[0, 1, 8:10] = .97  # object
+        attn[0, 2, 10] = .97    # object
+        self.assertAlmostEqual(model.object_count(attn).item(), 2., places=3)
+        with self.assertRaisesRegex(ValueError, "background"):
+            SlotAutoencoder(6, background_slots=(9,), **SLOT_CONFIG)
+
+    def test_expanding_slots_keeps_learned_queries(self):
+        from src.models.slots import expand_slot_state
+        small = SlotAutoencoder(6, **SLOT_CONFIG)
+        state = expand_slot_state(small.state_dict(), 6, torch.Generator().manual_seed(0))
+        big = SlotAutoencoder(6, **{**SLOT_CONFIG, "num_slots": 6})
+        big.load_state_dict(state)
+        self.assertTrue(torch.equal(big.slot_attention.queries[:4], small.slot_attention.queries))
+        self.assertEqual(big.encode(torch.randn(2, 6, 3, 5))["slots"].shape, (2, 6, 8))
+        with self.assertRaises(ValueError):
+            expand_slot_state(big.state_dict(), 4)
+
+    def test_sampler_puts_labelled_images_first_in_original_order(self):
+        from src.slots_pretrain import Sampler
+        a = np.arange(10, dtype=np.float32).reshape(10, 1, 1, 1)
+        b = 100 + np.arange(5, dtype=np.float32).reshape(5, 1, 1, 1)
+        labelled = (np.array([11, 3]), np.array([[np.nan, 2.], [5., 5.]], dtype=np.float32))
+        sampler = Sampler({"a": a, "b": b}, 6, 0, labelled, count_batch=2)
+        for _ in range(5):
+            x, targets = sampler.next()
+            self.assertEqual(x.shape[0], 6)
+            first = x[:2].flatten().tolist()
+            expected = {101.: 2., 3.: 5.}
+            self.assertEqual(sorted(first), [3., 101.])
+            for value, target in zip(first, targets[:, 1].tolist()):
+                self.assertEqual(expected[value], target)
