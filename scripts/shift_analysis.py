@@ -15,8 +15,8 @@ Images (one row per image, no labels used):
     quantiles and a KS test val vs test.
 
 Embeddings are cached in DIR as .npy so the analyses can be rerun without the encoders.
-Test images/captions are read here for analysis only (the organisers now allow it);
-nothing in this script feeds the training pipeline.
+Unlabelled test images/captions are allowed for analysis; nothing in this script feeds
+the training pipeline.
 """
 
 import argparse

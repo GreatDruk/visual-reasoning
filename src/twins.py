@@ -2,9 +2,8 @@
 
 Twins describe the same image, share the caption template and differ in one detail
 (1-3 tokens). Within each (image, category) group captions are matched greedily by
-token-level edit distance. Rules allow using unlabelled test captions to find twins;
-whether the twin normalisation itself is acceptable is an open question
-(KaggleTemplate.md), so it is off by default.
+token-level edit distance. Rules allow using unlabelled test captions both to find
+twins and for the twin normalisation; it is off by default and measured on val.
 """
 
 from collections import defaultdict

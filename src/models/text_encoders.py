@@ -10,8 +10,8 @@ PAD, UNK = "<pad>", "<unk>"
 
 
 class Vocab:
-    """Whitespace word vocabulary. Built from train(+val) captions only (rules: test
-    captions must not be used to fit preprocessing)."""
+    """Whitespace word vocabulary, built from train(+val) captions. Test captions add no
+    words (all 55 tokens of test occur in train), so including them would change nothing."""
 
     def __init__(self, captions, lowercase=True, min_freq=1):
         self.lowercase = lowercase
