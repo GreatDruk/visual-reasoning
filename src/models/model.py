@@ -52,12 +52,19 @@ class VisualReasoningModel(nn.Module):
                 count_text = (ci["rows"], ci["numbers"], ci["relations"], filters, references)
             if self.requires_geometry_inputs:
                 geometry_text = None
-                if geometry_inputs is not None:
+                comparison_kwargs = {}
+                if geometry_inputs is not None and "rows" in geometry_inputs:
                     gi = geometry_inputs
                     filters = self.text_encoder(gi["filter_tokens"], gi["filter_lengths"])
                     references = self.text_encoder(gi["reference_tokens"], gi["reference_lengths"])
                     geometry_text = (gi["rows"], gi["numbers"], gi["relations"], gi["kinds"], filters, references)
-                return self.fusion(image, text, twin_index, difference_mask, count_text=count_text, geometry_text=geometry_text)
+                if geometry_inputs is not None and geometry_inputs.get("comparison") is not None:
+                    ci = geometry_inputs["comparison"]
+                    filters = self.text_encoder(ci["tokens"], ci["lengths"])
+                    references = self.text_encoder(ci["reference_tokens"], ci["reference_lengths"])
+                    comparison_kwargs["comparison_text"] = (ci["rows"], ci["operators"], (filters, references))
+                return self.fusion(image, text, twin_index, difference_mask, count_text=count_text,
+                                   geometry_text=geometry_text, **comparison_kwargs)
             return self.fusion(image, text, twin_index, difference_mask, count_text=count_text)
         if self.requires_pairs:
             return self.fusion(image, text, twin_index, difference_mask)

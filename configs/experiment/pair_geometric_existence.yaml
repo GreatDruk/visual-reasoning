@@ -1,0 +1,13 @@
+# @package _global_
+# Option 1: train-only count>=1 / count==0 supervision, including conjunctions.
+defaults:
+  - pair_geometric_stage2
+
+name_exp: debug_pair_geometric_existence
+model:
+  fusion:
+    existence_weight: 0.5
+    route_spatial: false
+    comparison_route: "off"
+    comparison_weight: 1.0
+    comparison_source: stage2

@@ -18,6 +18,7 @@ from .features import cache_features, cache_key, load_images
 from .metrics import evaluate_scores
 from .models.model import VisualReasoningModel
 from .models.count_distribution import parse_count_caption
+from .models.geometric_count import caption_pair_key
 from .models.text_encoders import Vocab
 from .text_aug import paraphrases
 from .training import Trainer
@@ -281,7 +282,8 @@ def main(cfg):
         results[name] = metrics
         if name in ("val", "val_para") and cfg.train.postprocess.twin_normalize:
             names = [split.image_names[i] for i in split.img_idx]
-            pairs = find_twins(names, split.captions, split.categories)
+            keys = [caption_pair_key(c) for c in split.captions] if getattr(fusion, "caption_pairing", False) else split.categories
+            pairs = find_twins(names, split.captions, keys)
             tn = twin_normalize(logits, pairs)
             results[f"{name}_twin_norm"] = {k: v for k, v in evaluate_scores(tn, split.labels, split.categories, split.pair_ids).items() if "/" not in k}
         np.save(out_dir / f"{name}_logits.npy", logits)
@@ -299,7 +301,8 @@ def main(cfg):
         probs = torch.sigmoid(torch.from_numpy(test_logits)).numpy()
         if cfg.train.postprocess.twin_normalize:
             names = [test.image_names[i] for i in test.img_idx]
-            probs = twin_normalize(test_logits, find_twins(names, test.captions, test.categories))
+            keys = [caption_pair_key(c) for c in test.captions] if getattr(fusion, "caption_pairing", False) else test.categories
+            probs = twin_normalize(test_logits, find_twins(names, test.captions, keys))
         sample = pl.read_csv(resolve_path(cfg.data.sample_submission))
         if [c for c in sample.columns if c != "id"] != [cfg.data.submission_target_col]:
             raise ValueError("sample submission target column does not match data.submission_target_col")

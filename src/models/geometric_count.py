@@ -1,7 +1,7 @@
 """Train-only weak grounding and a shared geometric count density.
 
-The frozen stage-2 scorer is retained for every non-spatial-count caption. All
-extra inputs come from text; numbers only index the predicted count distribution.
+Optional existence supervision and inference routes leave the original preset
+unchanged. All extra inputs and route decisions come from caption text alone.
 """
 
 from dataclasses import dataclass
@@ -17,8 +17,81 @@ from .count_distribution import PairCountChoiceHead, parse_count_caption
 
 
 COUNT, POSITION, SPATIAL, ABSENCE = range(4)
+EXISTENCE, NONEXISTENCE, BINDING = range(4, 7)
 _RELATION_IDS = {"to the left of": 1, "to the right of": 2, "in front of": 3, "behind": 4}
 _RELATION_PATTERN = r"(to the left of|to the right of|in front of|behind)"
+_FILTER = r"(?:(?:small|large|gray|red|blue|green|brown|purple|cyan|yellow|metal|rubber) )*(?:object|cube|sphere|cylinder)"
+
+
+@dataclass(frozen=True)
+class ComparisonCaption:
+    left: str
+    right: str
+    operator: str
+
+
+@lru_cache(maxsize=65536)
+def parse_comparison_caption(caption):
+    """Count filters use exactly the stage-2 number-free encoding, including plurals."""
+    caption = " ".join(caption.lower().strip().rstrip(".").split())
+    match = re.fullmatch(r"(?:there are|the scene contains) (more|fewer) (.+?) than (.+)", caption)
+    if match:
+        operator, left, right = match.groups()
+    else:
+        match = re.fullmatch(r"(?:there are|the scene contains) as many (.+?) as (.+)", caption)
+        if match is None:
+            return None
+        operator, (left, right) = "equal", match.groups()
+    filters = [parse_count_caption("exactly one " + phrase) for phrase in (left, right)]
+    if any(p is None or p.relation for p in filters):
+        return None
+    # Reject clauses that the permissive exactly-N parser would otherwise accept.
+    if any(re.fullmatch(_FILTER, p.filter_text.split(" ", 2)[2]) is None for p in filters):
+        return None
+    return ComparisonCaption(filters[0].filter_text, filters[1].filter_text, operator)
+
+
+def comparison_log_probability(left, right, operators):
+    """Independent 0..10 distributions: sum joint mass over >, < or == bins.
+
+    operators: 0=more, 1=fewer, 2=equal. Compute in log space under AMP too.
+    """
+    bins = torch.arange(11, device=left.device)
+    masks = torch.stack([bins[:, None] > bins[None], bins[:, None] < bins[None],
+                         bins[:, None] == bins[None]])[operators]
+    joint = left.float()[:, :, None] + right.float()[:, None, :]
+    return joint.masked_fill(~masks, -torch.inf).flatten(1).logsumexp(-1)
+
+
+def encode_comparison_inputs(captions, vocab, device, source="stage2"):
+    parsed = [(i, p) for i, c in enumerate(captions) if (p := parse_comparison_caption(c)) is not None]
+    if not parsed:
+        return None
+    rows, values = zip(*parsed)
+    texts = [p.left for p in values] + [p.right for p in values]
+    if source == "geometry":
+        texts = ["a " + text.split(" ", 2)[2] for text in texts]
+    tokens, lengths = vocab.encode_batch(texts)
+    references, reference_lengths = vocab.encode_batch(["a object"] * (2 * len(rows)))
+    return {"rows": torch.tensor(rows, device=device),
+            "operators": torch.tensor([("more", "fewer", "equal").index(p.operator) for p in values], device=device),
+            "tokens": tokens.to(device), "lengths": lengths,
+            "reference_tokens": references.to(device), "reference_lengths": reference_lengths}
+
+
+def caption_pair_key(caption):
+    """Canonical grammar family for twin grouping, without the category column."""
+    caption = " ".join(caption.lower().strip().rstrip(".").split())
+    if parse_comparison_caption(caption) is not None:
+        return "comparison"
+    parsed = parse_geometric_caption(caption, include_existence=True)
+    if parsed is None:
+        raise ValueError(f"unsupported canonical caption for text-only pairing: {caption!r}")
+    if parsed.kind == COUNT:
+        return "spatial_count" if parsed.relation else "count"
+    if parsed.kind in (EXISTENCE, NONEXISTENCE):
+        return "negation" if caption.startswith(("there is ", "no ", "the scene contains ")) else "attribute"
+    return str(parsed.kind)
 
 
 @dataclass(frozen=True)
@@ -31,7 +104,7 @@ class GeometricCaption:
 
 
 @lru_cache(maxsize=65536)
-def parse_geometric_caption(caption):
+def parse_geometric_caption(caption, include_existence=False):
     """Deterministic canonical grammar, independent of metadata and truth labels."""
     caption = " ".join(caption.lower().strip().rstrip(".").split())
     count = parse_count_caption(caption)
@@ -46,11 +119,30 @@ def parse_geometric_caption(caption):
     if spatial:
         return GeometricCaption("a " + spatial[2], "a " + spatial[4],
                                 _RELATION_IDS[spatial[3]], kind=ABSENCE if spatial[1] == "no " else SPATIAL)
+    if include_existence:
+        body = re.sub(r"^(?:there is |the scene contains )", "", caption)
+        body = re.sub(r" (?:is|are) in the scene$", "", body)
+        absent = re.fullmatch(r"no (" + _FILTER + r")", body)
+        if absent:
+            return GeometricCaption("a " + absent[1], "a object", 0, kind=NONEXISTENCE)
+        present = re.fullmatch(r"a (" + _FILTER + r")(?: and a (" + _FILTER + r"))?", body)
+        if present:
+            return GeometricCaption("a " + present[1], "a " + present[2] if present[2] else "a object",
+                                    0, kind=BINDING if present[2] else EXISTENCE)
     return None
 
 
-def encode_geometric_inputs(captions, vocab, device):
-    parsed = [(i, p) for i, c in enumerate(captions) if (p := parse_geometric_caption(c)) is not None]
+def encode_geometric_inputs(captions, vocab, device, include_existence=False):
+    parsed = []
+    for i, caption in enumerate(captions):
+        value = parse_geometric_caption(caption, include_existence)
+        if value is not None:
+            if value.kind == BINDING:
+                # Both components keep the SAME caption row and one conjunction label.
+                for filter_text in (value.filter_text, value.reference_text):
+                    parsed.append((i, GeometricCaption(filter_text, "a object", 0, kind=BINDING)))
+            else:
+                parsed.append((i, value))
     if not parsed:
         return None
     rows, values = zip(*parsed)
@@ -141,7 +233,9 @@ class PairGeometricCountChoiceHead(PairCountChoiceHead):
 
     def __init__(self, in_channels, text_dim, geometry_dim=64, geometry_weight=1.,
                  baseline_weight=1., grounding_weight=.5, behind_sign=-1,
-                 geometry_sharpness=12., exclusion_radius=.12, **kwargs):
+                 geometry_sharpness=12., exclusion_radius=.12, existence_weight=0.,
+                 route_spatial=False, comparison_route="off", comparison_weight=1.,
+                 comparison_source="stage2", **kwargs):
         super().__init__(in_channels, text_dim, **kwargs)
         if not self.freeze_base or self.train_count_only:
             raise ValueError("geometry head requires freeze_base=true and train_count_only=false")
@@ -150,11 +244,22 @@ class PairGeometricCountChoiceHead(PairCountChoiceHead):
             geometry_dim, behind_sign, geometry_sharpness, exclusion_radius)
         self.geometry_weight, self.baseline_weight = geometry_weight, baseline_weight
         self.grounding_weight = grounding_weight
+        if (existence_weight < 0 or comparison_route not in ("off", "equality", "all")
+                or comparison_source not in ("stage2", "geometry")):
+            raise ValueError("invalid existence weight or comparison route")
+        self.existence_weight = existence_weight
+        self.route_spatial = route_spatial
+        self.comparison_route, self.comparison_weight = comparison_route, comparison_weight
+        self.comparison_source = comparison_source
+        self.caption_pairing = existence_weight > 0 or route_spatial or comparison_route != "off"
         self._geometry_output = None
 
     def supports_training_caption(self, caption):
-        parsed = parse_geometric_caption(caption)
-        return parsed is not None and (parsed.kind == COUNT or self.grounding_weight > 0)
+        parsed = parse_geometric_caption(caption, include_existence=self.existence_weight > 0)
+        if parsed is None:
+            return False
+        return (self.existence_weight > 0 if parsed.kind in (EXISTENCE, NONEXISTENCE, BINDING)
+                else parsed.kind == COUNT or self.grounding_weight > 0)
 
     def train(self, mode=True):
         super().train(False)
@@ -162,7 +267,8 @@ class PairGeometricCountChoiceHead(PairCountChoiceHead):
         self.training = mode
         return self
 
-    def forward(self, image, text, twin_index, difference_mask, count_text=None, geometry_text=None):
+    def forward(self, image, text, twin_index, difference_mask, count_text=None, geometry_text=None,
+                comparison_text=None):
         # Training needs only the new branch. Avoid running the large frozen pair
         # head for grounding examples; evaluation always uses the full baseline.
         if self.training:
@@ -172,7 +278,7 @@ class PairGeometricCountChoiceHead(PairCountChoiceHead):
                 base = super().forward(image, text, twin_index, difference_mask, count_text)
         self._geometry_output = None
         if geometry_text is None:
-            return base
+            return self._route_comparison(base, image, twin_index, comparison_text)
         rows, numbers, relations, kinds, filters, references = geometry_text
         pairs = twin_index.to(base.device)
         row_to_image = torch.empty_like(base, dtype=torch.long)
@@ -181,10 +287,46 @@ class PairGeometricCountChoiceHead(PairCountChoiceHead):
         self._geometry_output = (rows, numbers, kinds, outputs)
         logp = outputs[0].gather(1, numbers[:, None]).squeeze(1)
         spatial_count = (kinds == COUNT) & (relations != 0)
+        if self.route_spatial and not self.training:
+            # Existential truth is mass in the relation half-plane, not a centroid.
+            logp = torch.where(kinds == SPATIAL, outputs[0][:, 1:].logsumexp(-1), logp)
+            logp = torch.where(kinds == ABSENCE, outputs[0][:, 0], logp)
+            spatial_count = spatial_count | (kinds == SPATIAL) | (kinds == ABSENCE)
         utility = base.new_zeros(base.shape).scatter(0, rows, logp.to(base.dtype))
         active_rows = torch.zeros_like(base, dtype=torch.bool).scatter(0, rows, spatial_count)
         active = active_rows[pairs].all(1)
         margin = self.geometry_weight * (utility[pairs[:, 0]] - utility[pairs[:, 1]])
+        margin = margin + self.baseline_weight * (base[pairs[:, 0]] - base[pairs[:, 1]])
+        routed = base.new_zeros(base.shape).scatter(0, pairs.flatten(), torch.stack([margin / 2, -margin / 2], 1).flatten())
+        route = torch.zeros_like(base, dtype=torch.bool).scatter(0, pairs.flatten(), active[:, None].expand(-1, 2).flatten())
+        return self._route_comparison(torch.where(route, routed, base), image, twin_index, comparison_text)
+
+    def _route_comparison(self, base, image, twin_index, comparison_text):
+        if self.training or self.comparison_route == "off" or comparison_text is None:
+            return base
+        rows, operators, filters = comparison_text
+        pairs = twin_index.to(base.device)
+        row_to_image = torch.empty_like(base, dtype=torch.long)
+        row_to_image[pairs.flatten()] = torch.arange(len(pairs), device=base.device).repeat_interleave(2)
+        doubled = torch.cat([row_to_image[rows], row_to_image[rows]])
+        # relation=0 makes references irrelevant to the geometric gate, but the
+        # learned count readout still needs its original "a object" encoding.
+        filter_text, reference_text = filters
+        with torch.no_grad():
+            relations = torch.zeros(len(doubled), device=base.device, dtype=torch.long)
+            if self.comparison_source == "geometry":
+                distributions = self.geometry(image, filter_text, reference_text, relations, doubled)[0]
+            else:
+                distributions = self.count_distribution(image[doubled], filter_text, reference_text, relations)
+        left, right = distributions.split(len(rows))
+        logp = comparison_log_probability(left, right, operators)
+        utility = base.new_zeros(base.shape).scatter(0, rows, logp.to(base.dtype))
+        parsed = torch.zeros_like(base, dtype=torch.bool).scatter(0, rows, True)
+        active = parsed[pairs].all(1)
+        if self.comparison_route == "equality":
+            equality = torch.zeros_like(base, dtype=torch.bool).scatter(0, rows, operators == 2)
+            active = active & equality[pairs].any(1)
+        margin = self.comparison_weight * (utility[pairs[:, 0]] - utility[pairs[:, 1]])
         margin = margin + self.baseline_weight * (base[pairs[:, 0]] - base[pairs[:, 1]])
         routed = base.new_zeros(base.shape).scatter(0, pairs.flatten(), torch.stack([margin / 2, -margin / 2], 1).flatten())
         route = torch.zeros_like(base, dtype=torch.bool).scatter(0, pairs.flatten(), active[:, None].expand(-1, 2).flatten())
@@ -206,4 +348,26 @@ class PairGeometricCountChoiceHead(PairCountChoiceHead):
             selected = kinds == kind
             if selected.any():
                 loss = loss + self.grounding_weight * F.binary_cross_entropy_with_logits(logits[selected], target[selected])
+        if self.existence_weight > 0:
+            present = log_probs[:, 1:].logsumexp(-1)
+            for kind in (EXISTENCE, NONEXISTENCE, BINDING):
+                selected = kinds == kind
+                if not selected.any():
+                    continue
+                logp = log_probs[selected, 0] if kind == NONEXISTENCE else present[selected]
+                log_not = present[selected] if kind == NONEXISTENCE else log_probs[selected, 0]
+                targets = target[selected]
+                if kind == BINDING:
+                    unique = rows[selected].unique()
+                    # P(X exists AND Y exists); a false conjunction does not
+                    # imply either individual conjunct is false.
+                    order = rows[selected].argsort(stable=True)
+                    components = logp[order].reshape(-1, 2)
+                    absent = log_not[order].reshape(-1, 2)
+                    logp = components.sum(1)
+                    # P(not X OR (X AND not Y)), stable even when P(both)
+                    # rounds to one. Do not subtract that probability from one.
+                    log_not = torch.logaddexp(absent[:, 0], components[:, 0] + absent[:, 1])
+                    targets = labels[unique].float()
+                loss = loss + self.existence_weight * F.binary_cross_entropy_with_logits(logp - log_not, targets)
         return loss
