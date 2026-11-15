@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-from .models.image_encoders import CLIP_MEAN, CLIP_STD, IMAGENET_MEAN, IMAGENET_STD
+from .models.image_encoders import NORMALIZATION
 from .utils import resolve_path
 
 log = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ def preprocess(images_u8, size, normalize, flip=False):
         x = x.flip(-1)
     if tuple(x.shape[-2:]) != tuple(size):
         x = F.interpolate(x, size=tuple(size), mode="bilinear", align_corners=False)
-    mean, std = (CLIP_MEAN, CLIP_STD) if normalize == "clip" else (IMAGENET_MEAN, IMAGENET_STD)
+    mean, std = NORMALIZATION[normalize]
     mean = torch.tensor(mean, device=x.device).view(1, 3, 1, 1)
     std = torch.tensor(std, device=x.device).view(1, 3, 1, 1)
     return (x - mean) / std
@@ -47,6 +47,9 @@ def cache_key(encoder_cfg, data_cfg):
     extracted eval-mode features apart from older caches (whose keys lacked the prefix
     and collapsed the weights identity)."""
     h, w = data_cfg.image_size
+    if "model_name" in encoder_cfg:
+        norm = "norm" if encoder_cfg.get("norm", True) else "raw"
+        return f"clip_{encoder_cfg.model_name}_{encoder_cfg.pretrained}_block{encoder_cfg.out_layer}{norm}_{h}x{w}_{data_cfg.normalize}"
     weights = "none" if encoder_cfg.weights is None else str(encoder_cfg.weights)
     return f"eval-v2_{encoder_cfg.arch}_{weights}_{encoder_cfg.out_layer}_{h}x{w}_{data_cfg.normalize}"
 

@@ -1,5 +1,7 @@
-# Текстовая башня CLIP; использовать в паре с clip_vit_b32.
+# Замороженная текстовая башня того же SigLIP2, что и в siglip2_b16.
 _target_: src.models.text_encoders.ClipTextEncoder
-model_name: ViT-B-32
-pretrained: openai
+model_name: ViT-B-16-SigLIP2-256
+pretrained: webli
 freeze: true
+projection_dim: null           # необязательная обучаемая проекция; null: родные 768 измерений
+cache_dir: null                # null: HF cache; выводы по подписям кэшируются в RAM (CPU)

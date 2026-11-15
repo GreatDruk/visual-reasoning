@@ -374,8 +374,10 @@ class TransformerHead(nn.Module):
         max_cells=(20, 30),
         readout="cosine",
         requires_spatial=True,
+        input_pool=None,
     ):
         super().__init__()
+        self.input_pool = input_pool  # avg-pool factor for the input map (attention cost ~ cells^2)
         self.cell_proj = nn.Sequential(nn.Conv2d(in_channels, dim, 1), nn.BatchNorm2d(dim))
         self.pos = nn.Parameter(torch.zeros(1, dim, *max_cells))
         nn.init.trunc_normal_(self.pos, std=0.02)
@@ -389,6 +391,8 @@ class TransformerHead(nn.Module):
 
     def forward(self, image, text):
         _, words, mask = text
+        if self.input_pool:
+            image = F.avg_pool2d(image, self.input_pool)
         cells = self.cell_proj(image)
         h, w = cells.shape[-2:]
         pos = self.pos if self.pos.shape[-2:] == (h, w) else F.interpolate(self.pos, size=(h, w), mode="bilinear", align_corners=False)

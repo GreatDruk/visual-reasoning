@@ -4,7 +4,7 @@ from collections import Counter
 
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
 
 PAD, UNK = "<pad>", "<unk>"
 
@@ -77,9 +77,85 @@ class HFTextEncoder(nn.Module):
         raise ImportError("HFTextEncoder needs transformers: uv add transformers")
 
 
-class ClipTextEncoder(nn.Module):
-    """CLIP text tower via open_clip. Not installed here (no PyPI access)."""
+class ClipTokenizer:
+    """Fixed pretrained tokenizer with Vocab's batching/serialization interface.
 
-    def __init__(self, *args, **kwargs):
+    Remember raw captions for the encoder's feature cache. Captions with identical
+    pretrained ids share a cache key; no vocabulary is fitted on supplied captions.
+    """
+
+    def __init__(self, model_name, cache_dir=None):
+        import open_clip
+
+        self.tokenizer = open_clip.get_tokenizer(model_name, cache_dir=cache_dir)
+        self.itos = self.tokenizer.tokenizer.convert_ids_to_tokens(range(self.tokenizer.vocab_size))
+        self.lowercase = True  # SigLIP2's pretrained canonicalize cleaner lowercases.
+        self._encoded = {}
+        self._caption_by_ids = {}
+
+    def __len__(self):
+        return len(self.itos)
+
+    def encode_batch(self, captions):
+        missing = list(dict.fromkeys(c for c in captions if c not in self._encoded))
+        if missing:
+            ids, mask = self.tokenizer(missing, output_mask=True)
+            for caption, row, length in zip(missing, ids, mask.sum(dim=1).tolist()):
+                self._encoded[caption] = (row.clone(), length)
+                self._caption_by_ids.setdefault(tuple(row.tolist()), caption)
+        ids = torch.stack([self._encoded[c][0] for c in captions])
+        lengths = torch.tensor([self._encoded[c][1] for c in captions], dtype=torch.long)
+        return ids, lengths
+
+    def captions_for(self, tokens):
+        return [self._caption_by_ids[tuple(row)] for row in tokens.cpu().tolist()]
+
+
+class ClipTextEncoder(nn.Module):
+    """Frozen SigLIP text tower; only an optional output projection is trainable.
+
+    Full padded inputs preserve pretrained bidirectional attention and last-position
+    pooling. Cache detached outputs on CPU by caption, trimming token states to their
+    real length (including EOS). The trainable projection always runs after retrieval.
+    """
+
+    def __init__(self, model_name, pretrained, freeze=True, projection_dim=None, cache_dir=None):
         super().__init__()
-        raise ImportError("ClipTextEncoder needs open_clip_torch: uv add open_clip_torch")
+        import open_clip
+
+        if not freeze:
+            raise NotImplementedError("ClipTextEncoder is frozen-only (text features are cached)")
+        model = open_clip.create_model(model_name, pretrained=pretrained, cache_dir=cache_dir, device="cpu")
+        self.tower = model.text.eval()  # discard the image tower
+        self.tower.output_tokens = True
+        self.tower.requires_grad_(False)
+        self.tokenizer = ClipTokenizer(model_name, cache_dir=cache_dir)
+        self.out_dim = projection_dim if projection_dim is not None else self.tower.width
+        self.projection = nn.Identity() if projection_dim is None else nn.Linear(self.tower.width, projection_dim)
+        self._cache = {}
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.tower.eval()
+        return self
+
+    def forward(self, tokens, lengths):
+        captions = self.tokenizer.captions_for(tokens)
+        missing = {}
+        for i, caption in enumerate(captions):
+            if caption not in self._cache:
+                missing.setdefault(caption, i)
+        if missing:
+            rows = list(missing.values())
+            with torch.no_grad():
+                sentence, states = self.tower(tokens[rows])
+            for j, (caption, i) in enumerate(missing.items()):
+                self._cache[caption] = (
+                    sentence[j].detach().cpu().clone(),
+                    states[j, : int(lengths[i])].detach().cpu().clone(),
+                )
+        cached = [self._cache[c] for c in captions]
+        sentence = torch.stack([s for s, _ in cached]).to(tokens.device)
+        states = pad_sequence([t for _, t in cached], batch_first=True).to(tokens.device)
+        mask = torch.arange(states.shape[1], device=tokens.device)[None, :] < lengths.to(tokens.device)[:, None]
+        return self.projection(sentence), self.projection(states), mask

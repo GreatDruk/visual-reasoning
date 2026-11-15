@@ -9,3 +9,4 @@ dropout: 0.1
 max_cells: [20, 30]
 requires_spatial: true
 readout: cosine                 # cosine | bilinear_mlp | mlp (cosine: ограниченный логит, меньше запоминания)
+input_pool: null                # avg-pool factor of the input map before attention (cost ~ cells^2)

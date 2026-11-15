@@ -10,6 +10,9 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+SIGLIP_MEAN = (0.5, 0.5, 0.5)
+SIGLIP_STD = (0.5, 0.5, 0.5)
+NORMALIZATION = {"imagenet": (IMAGENET_MEAN, IMAGENET_STD), "clip": (CLIP_MEAN, CLIP_STD), "siglip": (SIGLIP_MEAN, SIGLIP_STD)}
 
 
 class TorchvisionEncoder(nn.Module):
@@ -58,13 +61,43 @@ class TorchvisionEncoder(nn.Module):
 
 
 class ClipImageEncoder(nn.Module):
-    """CLIP image tower via open_clip. open_clip is not installed in this environment
-    (no network access to PyPI), so this raises until it is added with `uv add open_clip_torch`."""
+    """Frozen image tower of an open_clip dual encoder (CLIP / SigLIP / SigLIP2).
 
-    def __init__(self, model_name, pretrained, spatial=False, freeze=True):
+    Only timm-backed towers (SigLIP family) are supported: their ViT trunk exposes
+    `forward_intermediates` and `set_input_size`. The position embedding is resampled to
+    `image_size` (H, W), so the 3:2 scenes are not squashed into a square. forward(x)
+    returns the patch tokens of transformer block `out_layer` as a map [B, C, H/16, W/16]
+    (`spatial=True`) or their mean [B, C]. The text tower is discarded.
+    """
+
+    def __init__(self, model_name, pretrained, image_size, out_layer=-1, norm=True, spatial=True, freeze=True, cache_dir=None):
         super().__init__()
-        try:
-            import open_clip  # noqa: F401
-        except ImportError as e:
-            raise ImportError("ClipImageEncoder needs open_clip_torch: uv add open_clip_torch") from e
-        raise NotImplementedError("CLIP encoders are not implemented yet")
+        import open_clip
+
+        if not freeze:
+            raise NotImplementedError("ClipImageEncoder is frozen-only (features are cached)")
+        model = open_clip.create_model(model_name, pretrained=pretrained, cache_dir=cache_dir)
+        trunk = getattr(model.visual, "trunk", None)
+        if trunk is None or not hasattr(trunk, "forward_intermediates"):
+            raise ValueError(f"{model_name}: only timm-backed towers (SigLIP) are supported")
+        trunk.set_input_size(img_size=tuple(image_size))
+        self.trunk = trunk.eval()
+        for p in self.trunk.parameters():
+            p.requires_grad_(False)
+        self.out_layer = out_layer % len(trunk.blocks)
+        self.norm = norm
+        self.spatial = spatial
+        self.freeze = True
+        self.trainable = False
+        self.out_channels = trunk.embed_dim
+
+    def train(self, mode=True):
+        super().train(mode)
+        self.trunk.eval()
+        return self
+
+    def forward(self, x):
+        fmap = self.trunk.forward_intermediates(
+            x, indices=[self.out_layer], norm=self.norm, stop_early=True, intermediates_only=True, output_fmt="NCHW"
+        )[0]
+        return fmap if self.spatial else fmap.mean(dim=(2, 3))
