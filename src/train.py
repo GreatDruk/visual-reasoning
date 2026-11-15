@@ -117,7 +117,8 @@ def _warm_start(model, name_exp):
     own = model.state_dict()
     copied = {k: v for k, v in src.items() if k in own and own[k].shape == v.shape}
     if getattr(model.fusion, "freeze_base", False):
-        missing = [k for k in own if "fusion.count_distribution." not in k and k not in copied]
+        optional = getattr(model.fusion, "warm_start_optional_prefixes", ("fusion.count_distribution.",))
+        missing = [k for k in own if not k.startswith(optional) and k not in copied]
         if missing:
             raise ValueError(f"frozen count model needs a complete compatible baseline; missing tensors: {missing}")
     own.update(copied)
@@ -219,6 +220,12 @@ def main(cfg):
             raise ValueError("count-only training requires complete exactly-N twin pairs")
         train_split = subset(train_split, count_rows)
         log.info(f"frozen base; training count branch on {len(train_split)} exactly-N rows only")
+    elif getattr(fusion, "train_geometry_only", False):
+        geometry_rows = np.array([fusion.supports_training_caption(c) for c in train_split.captions])
+        if not geometry_rows.any() or not np.all(geometry_rows[pair_groups(train_split)].sum(1) % 2 == 0):
+            raise ValueError("geometry training requires complete supported twin pairs")
+        train_split = subset(train_split, geometry_rows)
+        log.info(f"frozen stage 2; training geometry on {len(train_split)} text-parsed rows only")
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log.info(f"trainable params: {n_params / 1e6:.2f}M, vocab {len(vocab)}, in_channels {in_channels}")
 

@@ -16,6 +16,7 @@ from .features import preprocess
 from .metrics import evaluate_scores
 from .models.pair_choice import token_difference_mask
 from .models.count_distribution import encode_count_inputs
+from .models.geometric_count import encode_geometric_inputs
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,8 @@ class Trainer:
                            "difference_mask": token_difference_mask(tokens, lengths, pairs).to(self.device)}
         if getattr(self.model, "requires_count_inputs", False):
             pair_kwargs["count_inputs"] = encode_count_inputs(batch["captions"], self.vocab, self.device)
+        if getattr(self.model, "requires_geometry_inputs", False):
+            pair_kwargs["geometry_inputs"] = encode_geometric_inputs(batch["captions"], self.vocab, self.device)
         with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
             return self.model(x, tokens, lengths, **pair_kwargs).float()
 

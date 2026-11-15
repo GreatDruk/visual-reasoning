@@ -18,6 +18,7 @@ class VisualReasoningModel(nn.Module):
         self.spatial = spatial
         self.requires_pairs = getattr(fusion, "requires_pairs", False)
         self.requires_count_inputs = getattr(fusion, "requires_count_inputs", False)
+        self.requires_geometry_inputs = getattr(fusion, "requires_geometry_inputs", False)
         if getattr(fusion, "freeze_base", False):
             self.text_encoder.requires_grad_(False)
             if self.image_encoder is not None:
@@ -31,7 +32,7 @@ class VisualReasoningModel(nn.Module):
                 self.image_encoder.eval()
         return self
 
-    def forward(self, image, tokens, lengths, twin_index=None, difference_mask=None, count_inputs=None):
+    def forward(self, image, tokens, lengths, twin_index=None, difference_mask=None, count_inputs=None, geometry_inputs=None):
         if self.requires_pairs:
             if twin_index is None or difference_mask is None:
                 raise ValueError("pair-choice fusion requires twin_index and difference_mask")
@@ -49,6 +50,14 @@ class VisualReasoningModel(nn.Module):
                 filters = self.text_encoder(ci["filter_tokens"], ci["filter_lengths"])
                 references = self.text_encoder(ci["reference_tokens"], ci["reference_lengths"])
                 count_text = (ci["rows"], ci["numbers"], ci["relations"], filters, references)
+            if self.requires_geometry_inputs:
+                geometry_text = None
+                if geometry_inputs is not None:
+                    gi = geometry_inputs
+                    filters = self.text_encoder(gi["filter_tokens"], gi["filter_lengths"])
+                    references = self.text_encoder(gi["reference_tokens"], gi["reference_lengths"])
+                    geometry_text = (gi["rows"], gi["numbers"], gi["relations"], gi["kinds"], filters, references)
+                return self.fusion(image, text, twin_index, difference_mask, count_text=count_text, geometry_text=geometry_text)
             return self.fusion(image, text, twin_index, difference_mask, count_text=count_text)
         if self.requires_pairs:
             return self.fusion(image, text, twin_index, difference_mask)
