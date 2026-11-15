@@ -22,3 +22,8 @@ train:
   early_stopping:
     monitor: val_auc
     patience: 8
+
+model:
+  fusion:
+    input_pool: null            # full 16x24 grid: val AUC 0.923 vs 0.906 with 2x2 pooling
+    max_cells: [16, 24]
