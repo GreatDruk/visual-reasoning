@@ -1,6 +1,6 @@
 ### Текущее состояние
 
-- Лучшая модель — трёхэтапная на замороженном SigLIP2: голова выбора из пары → ветка подсчёта → геометрическая ветка (существование, spatial-маршруты, comparison через подсчёт). **val AUC 0.9844, public LB 0.98019** (`pair_geometric_comparison`, seed 42, обучение только на train). Главная оставшаяся потеря — counting 0.856.
+- Лучшая модель — трёхэтапная на замороженном SigLIP2: голова выбора из пары → ветка подсчёта → геометрическая ветка (существование, spatial-маршруты, comparison через подсчёт). val AUC 0.9844, public LB 0.98019 (`pair_geometric_comparison`, seed 42, обучение только на train). Плюс объектные слоты (Slot Attention поверх SigLIP2): **val AUC 0.9924, public LB 0.98999**. Слабее всего counting 0.943 и spatial_counting 0.941.
 - Подписи всех сплитов канонизируются в формы train (`data.canonicalize: true`), оценки нормализуются внутри пары (`train.postprocess.twin_normalize: true`). Пара = две строки с одной картинкой и категорией; в train, val и test такая группа всегда ровно из двух строк, ровно одна истинна.
 - Признаки SigLIP2 считаются один раз и кэшируются (`paths.features_dir`); обучаются только голова и текстовый GRU.
 - Финальный notebook ([02_final.ipynb](notebooks/02_final.ipynb)) **ещё обучает старого кандидата B**; перевод на трёхэтапную модель, офлайн-веса SigLIP2 и проверка лимита 50 мин на Kaggle GPU не сделаны.
@@ -63,6 +63,7 @@ uv run python -m src.train experiment=pair_geometric_stage2 model.init_from=debu
 | 6 | debug_pair_F_flip | + hflip с заменой left↔right (= `pair_best_stage1`) | 0.9675 | 0.8943 | 12.8 |
 | 7 | debug_count_on_F | + ветка подсчёта поверх F (= `pair_best_stage2`) | 0.9745 | 0.9060 | 1.8 |
 | 8 | debug_geometry_v1_s42 / s43 | + геометрическая ветка spatial_counting (`pair_geometric_stage2`) | 0.9774 / 0.9776 | 0.9147 / 0.9153 | 13.2 / 13.5 (CPU) |
+| 10 | debug_slots_k11 (s42) + sub_geometric_full | Slot Attention (K=11, предобучение без меток на train+val+test, `src/slots_pretrain.py`) + голова-программа подсчёта по слотам (`pair_slots_all`); отступ слотов складывается с отступом шага 9 | **0.9924** (s43: 0.9922) | — | 32 (слоты) + 14 |
 | 9 | debug_shift_existence_s42 / s43; sub_geometric_full (MPS) | + супервизия существования (attribute/binding/negation), геометрия на инференсе для spatial / spatial_negation, comparison через подсчёт (`pair_geometric_comparison`) | **0.9829 / 0.9838; 0.9844** | 0.9253 / 0.9290; 0.9310 | 13.3 / 13.8 (CPU); 14.8 |
 
 AUC по слабым категориям (остальные — attribute, binding, negation, position — 0.99–1.00 начиная с шага 5):
@@ -75,6 +76,7 @@ AUC по слабым категориям (остальные — attribute, bi
 | 7 | 0.972 | 0.856 | 0.930 | 0.600 | 0.896 |
 | 8 (s42 / s43) | 0.972 | 0.856 | 0.930 | 0.832 / 0.844 | 0.896 |
 | 9 (MPS, сабмит) | 0.987 | 0.856 | 0.968 | 0.913 | 0.978 |
+| 10 (шаг 9 + слоты) | 0.991 | 0.943 | 0.991 | 0.941 | 0.995 |
 
 spatial_counting на val — всего 160 пар. 95% bootstrap CI по парам: шаг 7 [0.509, 0.683], шаг 8 s42 [0.765, 0.886], s43 [0.779, 0.898] — интервалы не пересекаются.
 
@@ -87,7 +89,8 @@ spatial_counting на val — всего 160 пар. 95% bootstrap CI по па�
 | pair_count_val09745.csv | шаг 7, обучение на train | 0.96851 |
 | pair_count_trainval.csv | шаг 7, train+val, фиксированные эпохи 20 / 23 | 0.96779 |
 | pair_count_ens2.csv | среднее логитов двух строк выше (ансамбль — к финалу, не сейчас) | 0.97340 |
-| pair_geometric_val09843.csv | шаг 9 (`pair_geometric_comparison`, seed 42, train only), val 0.9844 | **0.98019** |
+| pair_geometric_val09843.csv | шаг 9 (`pair_geometric_comparison`, seed 42, train only), val 0.9844 | 0.98019 |
+| slots_geometric_val09924.csv | шаг 10: шаг 9 + отступ слотов (`scripts/slot_submission.py`), val 0.9924 | **0.98999** |
 
 #### Что не сработало
 - Длинное обучение (до 60 эпох) — 0.9489: раньше начинается переобучение.
