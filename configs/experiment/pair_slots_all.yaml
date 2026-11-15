@@ -1,0 +1,11 @@
+# @package _global_
+# Same training as pair_slots_stage2; evaluation routes every caption program
+# (exists / none / and too: spatial, spatial_negation, binding, ...) through the
+# slot margin + frozen stage-2 margin. Val K=11 seed 42: 0.9899 (count+cmp routing 0.9847).
+defaults:
+  - pair_slots_stage2
+
+name_exp: debug_pair_slots_all
+model:
+  fusion:
+    route_ops: [exact, exist, none, and, more, fewer, same]

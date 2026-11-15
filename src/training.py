@@ -17,6 +17,7 @@ from .metrics import evaluate_scores
 from .models.pair_choice import token_difference_mask
 from .models.count_distribution import encode_count_inputs
 from .models.geometric_count import caption_pair_key, encode_comparison_inputs, encode_geometric_inputs
+from .models.slot_program import encode_program_inputs
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +102,8 @@ class Trainer:
                 if comparison is not None:
                     geometry = dict(geometry or {}, comparison=comparison)
             pair_kwargs["geometry_inputs"] = geometry
+        if getattr(self.model, "requires_program_inputs", False):
+            pair_kwargs["program_inputs"] = encode_program_inputs(batch["captions"], self.device)
         with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
             return self.model(x, tokens, lengths, **pair_kwargs).float()
 
