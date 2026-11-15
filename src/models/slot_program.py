@@ -121,21 +121,28 @@ def encode_program_inputs(captions, device):
             "ref": _words([p.ref for p in programs]).to(device)}
 
 
+NEG = -1e4  # finite log(0): logaddexp(-inf, -inf) has a NaN gradient
+
+
 def log1mexp(x):
-    """log(1 - exp(x)) for x <= 0, numerically stable on both ends."""
+    """log(1 - exp(x)) for x <= 0, stable on both ends and NaN-free in backward."""
     x = x.clamp(max=-1e-6)
-    return torch.where(x > -math.log(2), torch.log(-torch.expm1(x)), torch.log1p(-torch.exp(x)))
+    near = x > -math.log(2)
+    a = torch.log(-torch.expm1(torch.where(near, x, torch.full_like(x, -1.))))
+    b = torch.log1p(-torch.exp(torch.where(near, torch.full_like(x, -1.), x)))
+    return torch.where(near, a, b)
 
 
 def poisson_binomial(log_p):
     """Per-slot log success probabilities [R, K] -> log P(count = n), [R, K + 1]."""
     log_q = log1mexp(log_p)
     r, k = log_p.shape
-    dist = log_p.new_full((r, k + 1), -torch.inf)
+    dist = log_p.new_full((r, k + 1), NEG)
     dist[:, 0] = 0
+    pad = log_p.new_full((r, 1), NEG)
     for j in range(k):
-        shifted = torch.cat([log_p.new_full((r, 1), -torch.inf), dist[:, :-1]], 1)
-        dist = torch.logaddexp(dist + log_q[:, j:j + 1], shifted + log_p[:, j:j + 1])
+        shifted = torch.cat([pad, dist[:, :-1]], 1)
+        dist = torch.logaddexp(dist + log_q[:, j:j + 1], shifted + log_p[:, j:j + 1]).clamp_min(NEG)
     return dist
 
 
@@ -204,9 +211,9 @@ class SlotProgramExecutor(nn.Module):
         exist_a, exist_b = log1mexp(dist_a[:, 0]), log1mexp(dist_b[:, 0])
         joint = dist_a[:, :, None] + dist_b[:, None, :]                       # [R, i=A, j=B]
         i = torch.arange(k + 1, device=joint.device)
-        more = joint.masked_fill(~(i[:, None] > i[None, :]), -torch.inf).flatten(1).logsumexp(-1)
-        fewer = joint.masked_fill(~(i[:, None] < i[None, :]), -torch.inf).flatten(1).logsumexp(-1)
-        same = joint.masked_fill(~(i[:, None] == i[None, :]), -torch.inf).flatten(1).logsumexp(-1)
+        more = joint.masked_fill(~(i[:, None] > i[None, :]), 2 * NEG).flatten(1).logsumexp(-1)
+        fewer = joint.masked_fill(~(i[:, None] < i[None, :]), 2 * NEG).flatten(1).logsumexp(-1)
+        same = joint.masked_fill(~(i[:, None] == i[None, :]), 2 * NEG).flatten(1).logsumexp(-1)
         table = torch.stack([exact, exist_a, dist_a[:, 0], exist_a + exist_b, more, fewer, same], 1)
         return table.gather(1, ops[:, None]).squeeze(1).clamp(-30., -1e-6), dist_a, dist_b
 

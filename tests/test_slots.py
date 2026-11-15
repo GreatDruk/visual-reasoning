@@ -105,6 +105,10 @@ class TestPrograms(unittest.TestCase):
             self.assertTrue(torch.allclose(dist[r], brute, atol=1e-9))
         x = torch.tensor([-1e-5, -.1, -5., -40.], dtype=torch.float64)
         self.assertTrue(torch.allclose(log1mexp(x), torch.log(1 - torch.exp(x)), rtol=1e-4))
+        # Certain slots (p = 1 or 0) must not produce NaN gradients.
+        logits = torch.tensor([[40., -40., 0., 40.]], requires_grad=True)
+        poisson_binomial(torch.nn.functional.logsigmoid(logits)).logsumexp(-1).sum().backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
 
     def test_executor_semantics_on_known_slots(self):
         """Slots: red cube (left), red cube (right), blue sphere (centre), background."""
