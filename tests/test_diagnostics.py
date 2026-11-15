@@ -5,13 +5,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from omegaconf import OmegaConf
 import torch
 
 from test_pipeline import build_data_dir, run_train
-from src.data import ArraySource, load_split, subset
+from src.data import ArraySource, load_split, subset, train_batches
 from src.features import load_images
 from src.losses import TruthLoss
 from src.metrics import evaluate_scores
@@ -45,6 +46,18 @@ def build_case(tmp, activation="relu"):
                         "channel_stats": True},
     })
     return model, vocab, split, cfg
+
+
+class _Clock:
+    """Value-driven stand-in for ``time.monotonic``/``time.time``: reads return the
+    current value and only a test assignment moves it, so a run is stopped by setting
+    ``clock.value`` from a callback instead of by counting clock reads."""
+
+    def __init__(self):
+        self.value = 0.
+
+    def __call__(self):
+        return self.value
 
 
 class TestTrainingDiagnostics(unittest.TestCase):
@@ -188,7 +201,8 @@ class TestTrainingDiagnostics(unittest.TestCase):
 
 
 class TestStepControls(unittest.TestCase):
-    """CPU regressions for max_steps truncation, absolute scheduler horizon and step_callback."""
+    """CPU regressions for max_steps truncation, absolute scheduler horizon, time budget
+    stops and step_callback."""
 
     @classmethod
     def setUpClass(cls):
@@ -318,6 +332,167 @@ class TestStepControls(unittest.TestCase):
                                    snapshot_steps=[1, 2, 3])
             for key, tensor in trainer.model.state_dict().items():
                 self.assertTrue(torch.equal(plain.model.state_dict()[key], tensor), key)
+
+    def test_time_budget_graceful_stop_matches_untruncated_prefix(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            cfg.time_budget_min = 2.        # 120 s budget ...
+            cfg.snapshot_reserve_sec = 50   # ... minus a 50 s reserve: deadline 70 s
+            clock = _Clock()
+            fired, captured = [], {}
+
+            def snapshot(trainer, opt, sched, epoch, step):
+                fired.append((step, epoch))
+                if step == 0:
+                    captured["step0_rng"] = trainer.epoch_start_sampler_rng
+                    captured["step0_cursor"] = trainer.batches_completed_in_epoch
+                if step == 3:
+                    # The deadline check of update 3 ran before this callback: the check
+                    # after update 4 is the first one to see the jump.
+                    clock.value = 80.
+                if step == 4:
+                    captured.update(
+                        weights={k: v.detach().clone() for k, v in trainer.model.state_dict().items()},
+                        opt_steps={int(state["step"]) for state in opt.state.values()},
+                        sched_last_epoch=sched.last_epoch,
+                        rng=copy.deepcopy(trainer.rng.bit_generator.state),
+                        epoch_start=copy.deepcopy(trainer.epoch_start_sampler_rng),
+                        cursor=trainer.batches_completed_in_epoch,
+                    )
+
+            with mock.patch("src.training.time.monotonic", clock):
+                trainer, history = self._train(tmp / "budget", model, vocab, split, cfg,
+                                               epochs=2, max_steps=6, snapshot_steps=[0, 1, 2, 3],
+                                               step_callback=snapshot)
+            # Stopped at the check after update 4 (80 >= 70), a non-trigger step, so the
+            # step-4 snapshot is the end-of-run callback; earlier triggers all fired.
+            self.assertEqual(fired, [(0, 0), (1, 1), (2, 1), (3, 1), (4, 2)])
+            self.assertEqual(trainer.stop_reason, "time_budget")
+            self.assertEqual(trainer.optimizer_steps, 4)
+            self.assertEqual(trainer.processed_rows, 8)
+            self.assertEqual([(r["epoch"], r["step"], r["processed_rows"], r["completed_epoch"])
+                              for r in history], [(1, 3, 6, True), (2, 4, 8, False)])
+            # Step 0 precedes the first epoch: no saved sampler rng and no batches in flight.
+            self.assertIsNone(captured["step0_rng"])
+            self.assertEqual(captured["step0_cursor"], 0)
+            # The final callback saw live, fully updated optimizer and scheduler counters.
+            self.assertEqual(captured["opt_steps"], {4})
+            self.assertEqual(captured["sched_last_epoch"], 4)
+            # The fit returned exactly the last state its callback saw, and the sampler rng
+            # stopped at the cursor: no extra batch was drawn to serve the callback.
+            for key, tensor in trainer.model.state_dict().items():
+                self.assertTrue(torch.equal(captured["weights"][key], tensor), key)
+            self.assertEqual(captured["rng"], trainer.rng.bit_generator.state)
+            self.assertEqual(captured["cursor"], 1)
+            replay = np.random.default_rng(0)
+            replay.bit_generator.state = copy.deepcopy(captured["epoch_start"])
+            batches = train_batches(split, cfg.batch_size, replay, {}, True)
+            next(batches)
+            self.assertEqual(replay.bit_generator.state, captured["rng"])
+            next(batches)  # one batch beyond the cursor must diverge
+            self.assertNotEqual(replay.bit_generator.state, captured["rng"])
+
+            prefix = {}
+
+            def checkpoint(trainer, opt, sched, epoch, step):
+                if step == 4:
+                    prefix["weights"] = {k: v.detach().clone() for k, v in trainer.model.state_dict().items()}
+                    prefix["opt_steps"] = {int(state["step"]) for state in opt.state.values()}
+                    prefix["sched_last_epoch"] = sched.last_epoch
+                    prefix["rng"] = copy.deepcopy(trainer.rng.bit_generator.state)
+                    prefix["epoch_start"] = copy.deepcopy(trainer.epoch_start_sampler_rng)
+
+            with mock.patch("src.training.time.monotonic", _Clock()):
+                plain, plain_history = self._train(tmp / "plain", model, vocab, split, cfg,
+                                                   epochs=2, max_steps=4, snapshot_steps=[0, 1, 2, 3],
+                                                   step_callback=checkpoint)
+            # The untruncated run hits max_steps=4 despite the budget and is identical to
+            # the graceful partial run at the stop step: weight for weight, row for row.
+            self.assertEqual(plain.stop_reason, "max_steps")
+            self.assertEqual(plain.optimizer_steps, 4)
+            self.assertEqual(prefix["opt_steps"], captured["opt_steps"])
+            self.assertEqual(prefix["sched_last_epoch"], captured["sched_last_epoch"])
+            self.assertEqual(prefix["rng"], captured["rng"])
+            self.assertEqual(prefix["epoch_start"], captured["epoch_start"])
+            for key, tensor in prefix["weights"].items():
+                self.assertTrue(torch.equal(captured["weights"][key], tensor), key)
+            drop_time = lambda rows: [{k: v for k, v in row.items() if k != "epoch_sec"} for row in rows]
+            self.assertEqual(drop_time(history), drop_time(plain_history))
+
+    def test_snapshot_reserve_sec_subtracts_from_time_budget(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            cfg.time_budget_min = 2.  # 120 s budget; both runs arm the clock to 60 s at step 2
+            for reserve, expected in ((50, ("max_steps", 6, [(1, 3, 6, True), (2, 6, 12, True)])),
+                                      (70, ("time_budget", 3, [(1, 3, 6, True)]))):
+                cfg.snapshot_reserve_sec = reserve
+                clock = _Clock()
+
+                def arm(trainer, opt, sched, epoch, step, clock=clock):
+                    if step == 2:
+                        clock.value = 60.
+
+                with mock.patch("src.training.time.monotonic", clock):
+                    trainer, history = self._train(tmp / str(reserve), model, vocab, split, cfg,
+                                                   epochs=2, max_steps=6, snapshot_steps=[2],
+                                                   step_callback=arm)
+                # The 50 s reserve keeps the deadline at 70 s, above the armed 60 s, so only
+                # max_steps stops the run; the 70 s reserve drops the deadline to 50 s and
+                # the budget truncates the run at the check after update 3.
+                stop_reason, steps, rows = expected
+                self.assertEqual(trainer.stop_reason, stop_reason, reserve)
+                self.assertEqual(trainer.optimizer_steps, steps, reserve)
+                self.assertEqual([(r["epoch"], r["step"], r["processed_rows"], r["completed_epoch"])
+                                  for r in history], rows, reserve)
+
+    def test_constant_warmup9_keeps_optimizer_identity_across_snapshots(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            cfg.scheduler.name = "constant"
+            cfg.scheduler.warmup_steps = 9
+            lrs, opts, sched_steps = [], [], []
+
+            def snapshot(trainer, opt, sched, epoch, step):
+                lrs.append({g["name"]: g["lr"] for g in opt.param_groups})
+                opts.append(opt)
+                sched_steps.append(sched.last_epoch)
+
+            trainer, history = self._train(tmp / "warmup", model, vocab, split, cfg,
+                                           epochs=4, max_steps=12, snapshot_steps=range(12),
+                                           step_callback=snapshot)
+            self.assertEqual(trainer.stop_reason, "max_steps")
+            self.assertEqual(trainer.optimizer_steps, 12)
+            self.assertEqual([(r["epoch"], r["step"], r["processed_rows"], r["completed_epoch"])
+                              for r in history],
+                             [(1, 3, 6, True), (2, 6, 12, True), (3, 9, 18, True), (4, 12, 24, True)])
+            self.assertEqual(len(lrs), 13)                        # one snapshot at each step 0..12
+            self.assertTrue(all(opt is opts[0] for opt in opts))  # one optimizer for the whole run
+            self.assertEqual(sched_steps, list(range(13)))        # scheduler step == optimizer updates
+            # Constant LR after a 9-step warmup over 12 updates: no cosine tail over the rest.
+            warmup = [(step + 1) / 9 for step in range(9)]
+            np.testing.assert_allclose([lr["task"] / cfg.optimizer.lr for lr in lrs], warmup + [1.] * 4)
+            np.testing.assert_allclose([lr["image_encoder"] / cfg.optimizer.image_encoder_lr for lr in lrs],
+                                       warmup + [1.] * 4)
+            self.assertEqual({int(state["step"]) for state in opts[-1].state.values()}, {12})
+
+    def test_legacy_fixed_epoch_refit_still_raises_on_time_budget(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            cfg.time_budget_min = 2.  # the legacy branch projects epochs from wall time
+            clock = _Clock()
+
+            def jump(trainer, opt, sched, epoch, step):
+                if step == 3:  # the last batch of epoch 1
+                    clock.value = 600.  # 10 min elapsed -> 20 min projected over the budget
+
+            with mock.patch("src.training.time.time", clock):
+                with self.assertRaises(RuntimeError):
+                    self._train(tmp / "legacy", model, vocab, split, cfg, epochs=2,
+                                snapshot_steps=[3], step_callback=jump)
 
 
 if __name__ == "__main__":

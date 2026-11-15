@@ -1,5 +1,6 @@
 /data/
-artefacts/
+/artefacts/*
+!/artefacts/film_long_training_investigation.md
 __*__
 .venv
 .*cache

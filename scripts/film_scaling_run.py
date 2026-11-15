@@ -21,6 +21,7 @@ import polars as pl
 import torch
 
 from src.data import load_split, pair_groups, sample_pairs_by_category, subset
+from src.data import eval_batches
 from src.diagnostics import prediction_summary
 from src.metrics import evaluate_scores
 from src.models.model import VisualReasoningModel
@@ -180,6 +181,52 @@ def measure(trainer, full, original, rest, fitted, output, step, cached_logits=N
     return result
 
 
+def fitted_measurement(trainer, full, fitted, output, step):
+    """Evaluate only fitted rows; keep the historical fitted sensitivity probe."""
+    started = time.monotonic()
+    levels = pl.read_csv('data/train.csv')['level'].to_numpy()[np.isin(full.ids, fitted.ids)]
+    with observation(trainer):
+        logits = trainer.predict(fitted)
+        assert logits.shape == (len(fitted),) and np.isfinite(logits).all()
+        np.save(output / f'logits_step{step:04d}.npy', logits)
+        result = {'step': step, 'groups': {'fitted': quality(logits, fitted, levels)},
+                  'probes': {'fitted': sensitivity(trainer, fitted)}}
+    result['measurement_sec'] = time.monotonic() - started
+    dump(output / f'measurement_step{step:04d}.json', result)
+    row = result['groups']['fitted']
+    print(json.dumps({'step': step, 'sec': result['measurement_sec'],
+                      'auc': row['metrics']['auc'], 'bce': row['summary']['bce'],
+                      'pair_accuracy': row['summary']['pair_accuracy'],
+                      'image_delta': result['probes']['fitted']['image_delta']}), flush=True)
+    return result
+
+
+def gradient_probe(trainer, fitted):
+    """Fixed train-only eval gradients, distinct from actual clipped training updates."""
+    probe = sample_pairs_by_category(fitted, 16, trainer.seed)
+    batch = next(eval_batches(probe, trainer.cfg.batch_size))
+    modules = {'text_encoder': trainer.model.text_encoder, 'fusion': trainer.model.fusion,
+               'image_encoder': trainer.model.image_encoder}
+    grouped = {name: [p for p in module.parameters() if p.requires_grad]
+               for name, module in modules.items() if module is not None}
+    params = [p for group in grouped.values() for p in group]
+    with observation(trainer), torch.enable_grad():
+        trainer.model.eval()
+        logits = trainer._forward(probe, batch)
+        labels = torch.as_tensor(probe.labels[batch['rows']], device=trainer.device).float()
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        gradients = torch.autograd.grad(loss, params)
+        result, offset = {}, 0
+        for name, group in grouped.items():
+            values = gradients[offset:offset + len(group)]
+            offset += len(group)
+            norm = float(torch.stack([g.detach().float().norm() for g in values]).norm())
+            result[name] = {'norm': norm, 'rms': norm / math.sqrt(sum(p.numel() for p in group)),
+                            'finite': all(bool(torch.isfinite(g).all()) for g in values)}
+    return {'ids': probe.ids[batch['rows']].tolist(),
+            'mode': 'eval/no_dropout; read-only autograd.grad', 'gradients': result}
+
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('action', choices=('evaluate', 'run'))
@@ -195,7 +242,12 @@ def main():
     parser.add_argument('--warmup', type=int, default=9)
     parser.add_argument('--task-lr', type=float, default=3e-4)
     parser.add_argument('--device', default='auto')
+    parser.add_argument('--fitted-only', action='store_true', help='Evaluate fitted rows and one fixed fitted probe only')
+    parser.add_argument('--snapshot-reserve-sec', type=float, default=0.)
+    parser.add_argument('--anomaly-snapshots', action='store_true',
+                        help='Keep additional states on large probe drops or gradient norms >100')
     args = parser.parse_args()
+    wall_started = time.monotonic()
     args.output.mkdir(parents=True, exist_ok=False)
     dump(args.output / 'invocation.json', {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()})
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(message)s')
@@ -221,8 +273,13 @@ def main():
     cfg.train.eval.train = False
     cfg.train.epochs = math.ceil(args.steps / math.ceil(len(fitted) / cfg.train.batch_size))
     cfg.train.time_budget_min = 29
+    cfg.train.snapshot_reserve_sec = args.snapshot_reserve_sec
     cfg.train.max_steps = args.steps
     cfg.train.snapshot_steps = [int(s) for s in args.snapshots.split(',')]
+    requested_snapshots = set(cfg.train.snapshot_steps)
+    if args.anomaly_snapshots:
+        cfg.train.snapshot_steps = sorted(requested_snapshots | set(range(270, args.steps + 1, 270)))
+        cfg.train.anomaly_snapshot_gradient_norm = 100.
     cfg.train.scheduler.name = args.schedule
     cfg.train.scheduler.warmup_steps = args.warmup
     cfg.train.scheduler.total_steps = args.horizon
@@ -233,10 +290,11 @@ def main():
     cfg.train.diagnostics.capture_steps = list(cfg.train.snapshot_steps)
     cfg.investigation = {'reference': str(args.reference), 'subset_manifest': str(args.subset) if args.subset else None,
                          'start': args.start, 'initial_state_sha256': initial_hash, 'start_state_sha256': start_hash,
-                         'optimizer_state': 'reset_identically_all_branches; old checkpoint contains model only',
-                         'scheduler_state': 'reset_to_explicit_absolute_step_trajectory',
+                         'optimizer_state': 'fresh AdamW once at step0; no restart within fit',
+                         'scheduler_state': 'fresh absolute-step scheduler once at step0; no restart within fit',
                          'batch_sampler': 'whole pairs; numpy default_rng seed42; no augmentation',
-                         'measurements': 'full train only; original/rest are not holdout',
+                         'measurements': 'fitted train only; one fixed probe' if args.fitted_only else
+                                         'full train only; original/rest are not holdout',
                          'torch_version': str(torch.__version__), 'device': str(device)}
     cfg.investigation.vocab_source = str(args.reference / 'vocab.json')
     cfg.investigation.oov_tokens = sorted({w for c in full.captions for w in trainer.vocab.split(c)
@@ -248,7 +306,10 @@ def main():
         assert manifest['train_csv_sha256'] == cfg.investigation.train_csv_sha256
     cfg.investigation.source_sha256 = {
         path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        for path in ('src/training.py', 'src/diagnostics.py', 'src/data.py', 'scripts/film_scaling_run.py')}
+        for path in ('src/training.py', 'src/diagnostics.py', 'src/data.py', 'scripts/film_scaling_run.py',
+                     'src/train.py', 'src/models/image_encoders.py', 'src/models/text_encoders.py',
+                     'src/models/fusion.py', 'src/models/model.py', 'src/features.py', 'src/utils.py',
+                     'src/losses.py', 'src/metrics.py')}
     OmegaConf.save(cfg, args.output / 'config.yaml', resolve=True)
     cached_logits = None
     if args.baseline_dir is not None:
@@ -256,26 +317,78 @@ def main():
         assert baseline_cfg.investigation.start_state_sha256 == start_hash
         np.testing.assert_array_equal(np.load(args.baseline_dir / 'train_ids.npy'), full.ids)
         cached_logits = args.baseline_dir / 'logits_step0000.npy'
+        np.testing.assert_array_equal(np.load(args.baseline_dir / 'fitted_ids.npy'), fitted.ids)
+        assert json.loads((args.baseline_dir / 'vocab.json').read_text()) == {
+            'itos': trainer.vocab.itos, 'lowercase': trainer.vocab.lowercase}
     trainer.cfg = cfg.train
     trainer.diagnostics_dir = args.output
     if args.action == 'evaluate':
         measure(trainer, full, original, rest, fitted, args.output, 0)
         return
     # Keep the reference's post-initialization RNG stream; observations preserve it.
-    rows = []
+    rows, snapshot_steps = [], []
+    best_probe_auc = 0.
     def snapshot(current, optimizer, scheduler, epoch, step):
+        nonlocal best_probe_auc
+        events = [json.loads(line) for line in (args.output / 'diagnostics.jsonl').read_text().splitlines()]
+        updates = [row for row in events if row['event'] == 'optimizer_step' and row['step'] == step]
+        probes = [row for row in events if row['event'] == 'probe' and row['step'] == step]
+        update = updates[-1] if updates else None
+        probe_auc = probes[-1]['metrics']['auc'] if probes else None
+        reasons = []
+        if args.anomaly_snapshots:
+            if current.gradient_alert:
+                reasons.append('total_preclip_gradient_norm_above_100')
+            if probe_auc is not None and best_probe_auc - probe_auc >= .20:
+                reasons.append('fixed_36_row_probe_auc_drop_at_least_0.20; noisy_diagnostic_not_full_quality')
+            if update and any(value['norm'] is not None and value['norm'] > 100
+                              for value in update['gradients_before_clip'].values()):
+                reasons.append('preclip_module_gradient_norm_above_100')
+        if probe_auc is not None:
+            best_probe_auc = max(best_probe_auc, probe_auc)
+        final = current.stop_reason != 'epochs' or step == args.steps
+        if step not in requested_snapshots and not final and not reasons:
+            return
         with observation(current):
             state = {name: tensor.detach().cpu().clone() for name, tensor in current.model.state_dict().items()}
+            if step == 0 and args.baseline_dir is not None:
+                baseline = torch.load(args.baseline_dir / 'checkpoint_step0000.pt',
+                                      map_location='cpu', weights_only=True)
+                assert state_hash(state) == state_hash(baseline['model'])
+                assert torch.equal(torch.get_rng_state(), baseline['torch_rng'])
+                assert random.getstate() == baseline['python_rng']
+                if device.type == 'mps':
+                    assert torch.equal(torch.mps.get_rng_state(), baseline['mps_rng'])
+                assert optimizer.state_dict()['param_groups'] == baseline['optimizer']['param_groups']
+                assert current.rng.bit_generator.state == baseline['sampler_rng']
+                numpy_state = np.random.get_state()
+                assert (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]) == baseline['numpy_rng']
             numpy_rng = np.random.get_state()
-            torch.save({'model': state, 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
-                        'step': step, 'epoch': epoch, 'sampler_rng': current.rng.bit_generator.state,
-                        'torch_rng': torch.get_rng_state(),
-                        'python_rng': random.getstate(),
-                        'numpy_rng': (numpy_rng[0], numpy_rng[1].tolist(), *numpy_rng[2:]),
-                        'mps_rng': torch.mps.get_rng_state() if device.type == 'mps' else None},
-                       args.output / f'checkpoint_step{step:04d}.pt')
-            rows.append(measure(current, full, original, rest, fitted, args.output, step,
-                                cached_logits=cached_logits if step == 0 else None))
+            checkpoint = {'model': state, 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
+                          'step': step, 'epoch': epoch, 'sampler_rng': current.rng.bit_generator.state,
+                          'epoch_start_sampler_rng': current.epoch_start_sampler_rng,
+                          'batches_completed_in_epoch': current.batches_completed_in_epoch,
+                          'processed_rows': current.processed_rows, 'stop_reason': current.stop_reason,
+                          'torch_rng': torch.get_rng_state(), 'python_rng': random.getstate(),
+                          'numpy_rng': (numpy_rng[0], numpy_rng[1].tolist(), *numpy_rng[2:]),
+                          'mps_rng': torch.mps.get_rng_state() if device.type == 'mps' else None,
+                          'cuda_rng': torch.cuda.get_rng_state_all() if device.type == 'cuda' else None,
+                          'scaler': current.scaler.state_dict() if current.scaler is not None else None,
+                          'optimizer_observation': update, 'diagnostic_reasons': reasons,
+                          'lr_next': {g['name']: g['lr'] for g in optimizer.param_groups}}
+            checkpoint['total_gradient_norm_before_clip'] = current.total_gradient_norm_before_clip
+            if not current.stop_reason.startswith('nonfinite'):
+                checkpoint['gradient_probe'] = gradient_probe(current, fitted)
+            torch.save(checkpoint, args.output / f'checkpoint_step{step:04d}.pt')
+            snapshot_steps.append(step)
+            if current.stop_reason.startswith('nonfinite'):
+                dump(args.output / 'failure.json', {'step': step, 'reason': current.stop_reason})
+                return
+            if args.fitted_only:
+                rows.append(fitted_measurement(current, full, fitted, args.output, step))
+            else:
+                rows.append(measure(current, full, original, rest, fitted, args.output, step,
+                                    cached_logits=cached_logits if step == 0 else None))
     started = time.monotonic()
     history = trainer.fit(fitted, {}, {'hflip_swap_lr': 0., 'reorder_clauses_p': 0.}, step_callback=snapshot)
     elapsed = time.monotonic() - started
@@ -283,7 +396,9 @@ def main():
     dump(args.output / 'results.json', {'history': history, 'optimizer_steps': trainer.optimizer_steps,
                                       'processed_rows': trainer.processed_rows,
                                       'stop_reason': trainer.stop_reason, 'fit_min': elapsed / 60,
-                                      'snapshot_steps': [row['step'] for row in rows],
+                                      'snapshot_steps': snapshot_steps,
+                                      'measurement_steps': [row['step'] for row in rows],
+                                      'wall_sec': time.monotonic() - wall_started,
                                       'fitted_rows': len(fitted),
                                       'epochs_equivalent': trainer.processed_rows / len(fitted)})
     print(json.dumps({'output': str(args.output), 'fit_min': elapsed / 60, 'steps': trainer.optimizer_steps}), flush=True)

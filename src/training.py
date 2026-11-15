@@ -102,8 +102,9 @@ class Trainer:
 
         Keeps the weights of the best epoch by `monitor` (e.g. "val_auc"), or the last
         epoch when early stopping is disabled; the kept epoch is in `self.best_epoch`.
-        Returns the per-epoch history. If `time_budget_min` would cut a fixed-epoch
-        refit (`early_stopping=null`) short, raises instead of returning a partial fit.
+        Returns the per-epoch history. A time-limited `max_steps` diagnostic run
+        returns its last state and fires the final callback; a fixed-epoch refit
+        without `max_steps` still raises rather than silently returning a partial fit.
 
         Step control (optional keys, absent/None preserves legacy behavior):
         `cfg.max_steps` stops exactly after that many optimizer updates, even mid-epoch
@@ -124,10 +125,20 @@ class Trainer:
         does not save or restore RNG state. `self.processed_rows` counts the training
         rows consumed; every history row reports `step`, `processed_rows` and
         `completed_epoch` (False for an epoch cut short by `cfg.max_steps`).
+        Bounded runs check a monotonic deadline after every update; optional
+        `snapshot_reserve_sec` reserves time for the final callback. For mid-epoch
+        continuation, callbacks can save `epoch_start_sampler_rng` and
+        `batches_completed_in_epoch`, replay that epoch's batches to its cursor,
+        and then restore the saved framework RNG before the next forward.
         """
         cfg = self.cfg
         self.optimizer_steps = 0
         self.processed_rows = 0
+        self.stop_reason = "epochs"
+        self.epoch_start_sampler_rng = None
+        self.batches_completed_in_epoch = 0
+        self.gradient_alert = False
+        self.total_gradient_norm_before_clip = None
         params = [p for p in self.model.parameters() if p.requires_grad]
         opt = self._make_optimizer()
         for group in opt.param_groups:
@@ -172,6 +183,10 @@ class Trainer:
         monitor = es.monitor if es else monitor
         best, best_state, bad_epochs, history = -np.inf, None, 0, []
         start = time.time()
+        bounded_start = time.monotonic()
+        deadline = None
+        if max_steps is not None and cfg.time_budget_min:
+            deadline = bounded_start + cfg.time_budget_min * 60 - cfg.get("snapshot_reserve_sec", 0)
         diagnostics = None
         diagnostic_cfg = cfg.get("diagnostics")
         if diagnostic_cfg and diagnostic_cfg.enabled:
@@ -187,9 +202,13 @@ class Trainer:
             self.model.train()
             t0, losses = time.time(), []
             truncated = False
+            self.epoch_start_sampler_rng = copy.deepcopy(self.rng.bit_generator.state)
+            self.batches_completed_in_epoch = 0
             for batch_index, batch in enumerate(train_batches(train_split, cfg.batch_size, self.rng, aug, cfg.pair_sampler), 1):
                 step += 1
-                observe = diagnostics is not None and diagnostics.should_capture(step)
+                self.gradient_alert = False
+                near_deadline = deadline is not None and time.monotonic() >= deadline - 1
+                observe = diagnostics is not None and (diagnostics.should_capture(step) or near_deadline)
                 with diagnostics.trace(train_split, batch, epoch, step, opt) if observe else nullcontext():
                     logits = self._forward(train_split, batch)
                     pair_index = batch.get("pair_index")
@@ -204,8 +223,20 @@ class Trainer:
                         self.scaler.unscale_(opt)
                     else:
                         loss.backward()
-                if cfg.grad_clip:
-                    torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
+                # Do not apply a corrupt update in a bounded diagnostic run.
+                if max_steps is not None and not bool(torch.isfinite(loss)):
+                    self.stop_reason = "nonfinite_loss"
+                    truncated = True
+                    break
+                if cfg.grad_clip or max_steps is not None:
+                    norm = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip or float("inf"))
+                    self.total_gradient_norm_before_clip = float(norm)
+                    alert_threshold = cfg.get("anomaly_snapshot_gradient_norm")
+                    self.gradient_alert = alert_threshold is not None and float(norm) > alert_threshold
+                    if max_steps is not None and not bool(torch.isfinite(norm)):
+                        self.stop_reason = "nonfinite_gradients"
+                        truncated = True
+                        break
                 if self.scaler is not None:
                     scale_before = self.scaler.get_scale()
                     self.scaler.step(opt)
@@ -221,16 +252,27 @@ class Trainer:
                     diagnostics.finish_step(logits, loss, batch, opt, stepped)
                     diagnostics.probe(epoch, step, "step")
                 self.processed_rows += len(batch["captions"])
-                if step_callback is not None and self.optimizer_steps in triggers:
+                self.batches_completed_in_epoch = batch_index
+                if max_steps is not None and self.optimizer_steps >= max_steps:
+                    self.stop_reason = "max_steps"
+                if (deadline is not None and self.optimizer_steps != max_steps
+                        and time.monotonic() >= deadline):
+                    self.stop_reason = "time_budget"
+                if step_callback is not None and (self.optimizer_steps in triggers or self.gradient_alert):
                     fire(epoch)
                 losses.append(loss.item())
                 if max_steps is not None and self.optimizer_steps >= max_steps:
                     truncated = batch_index < steps_per_epoch
                     break
+                if self.stop_reason == "time_budget":
+                    truncated = batch_index < steps_per_epoch
+                    break
 
-            if diagnostics is not None and diagnostics.last_probe_step != step:
+            if (diagnostics is not None and diagnostics.last_probe_step != step
+                    and not self.stop_reason.startswith("nonfinite")):
                 diagnostics.probe(epoch, step, "epoch_end")
-            row = {"epoch": epoch, "loss": float(np.mean(losses)), "epoch_sec": round(time.time() - t0, 1),
+            row = {"epoch": epoch, "loss": float(np.mean(losses)) if losses else None,
+                   "epoch_sec": round(time.time() - t0, 1),
                    "step": self.optimizer_steps, "processed_rows": self.processed_rows,
                    "completed_epoch": not truncated}
             row.update({f"lr/{g['name']}": g["lr"] for g in opt.param_groups})
@@ -244,7 +286,7 @@ class Trainer:
                 for k, v in row.items() if "_auc/" not in k
             ))
 
-            score = row[monitor] if es is not None else -row["loss"]
+            score = row[monitor] if es is not None else (-row["loss"] if losses else -np.inf)
             improved = score > best
             if improved:
                 best, bad_epochs = score, 0
@@ -255,7 +297,10 @@ class Trainer:
                 # is truncated); early stopping keeps the best monitored epoch instead.
                 self.best_epoch = epoch
                 best_state = copy.deepcopy(self.model.state_dict())
-            if truncated or (max_steps is not None and self.optimizer_steps >= max_steps):
+            if self.stop_reason in ("time_budget", "nonfinite_loss", "nonfinite_gradients"):
+                log.info(f"{self.stop_reason} at epoch {epoch}, step {self.optimizer_steps}")
+                break
+            if max_steps is not None and self.optimizer_steps >= max_steps:
                 # The requested target is reached: stop exactly here, and a time budget
                 # cannot call this fit incomplete.
                 self.stop_reason = "max_steps"
@@ -265,7 +310,7 @@ class Trainer:
                 self.stop_reason = "early_stopping"
                 log.info(f"early stopping at epoch {epoch}, best {monitor} {best:.4f}")
                 break
-            if epoch < cfg.epochs:
+            if epoch < cfg.epochs and max_steps is None:
                 elapsed_min = (time.time() - start) / 60
                 if cfg.time_budget_min and elapsed_min * (epoch + 1) / epoch > cfg.time_budget_min:
                     self.stop_reason = "time_budget"
@@ -282,6 +327,6 @@ class Trainer:
             # before the restore so model/optimizer/scheduler all describe that step.
             fire(epoch)
         self.model.load_state_dict(best_state)
-        if diagnostics is not None:
+        if diagnostics is not None and not self.stop_reason.startswith("nonfinite"):
             diagnostics.probe(self.best_epoch, step, "restored")
         return history

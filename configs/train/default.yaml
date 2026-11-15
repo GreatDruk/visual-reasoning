@@ -19,6 +19,7 @@ early_stopping:
   monitor: val_auc
   patience: 4
 time_budget_min: 45             # лимит 50 мин на Kaggle GPU, оставляем запас на инференс
+snapshot_reserve_sec: 0          # для max_steps: запас внутри бюджета на финальный snapshot
 cache_features: true            # при замороженном энкодере считать фичи один раз
 predict_test: false             # false: test не читается вообще; true: финальный запуск — предсказания после обучения
 eval:
