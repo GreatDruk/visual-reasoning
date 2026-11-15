@@ -1,6 +1,5 @@
 /data/
 /artefacts/*
-!/artefacts/film_long_training_investigation.md
 __*__
 .venv
 .*cache
@@ -10,3 +9,5 @@ catboost_info
 submissions/
 /final_submission.csv
 /resources/torch/
+.mimocode/
+/.claude/worktrees/
