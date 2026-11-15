@@ -13,7 +13,7 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate as _instantiate
 from omegaconf import OmegaConf
 
-from .data import ArraySource, concat_splits, load_split, paraphrased, sample_pairs_by_category, save_submission, subset
+from .data import ArraySource, canonicalized, concat_splits, load_split, paraphrased, sample_pairs_by_category, save_submission, subset
 from .features import cache_features, cache_key, load_images
 from .metrics import evaluate_scores
 from .models.model import VisualReasoningModel
@@ -112,7 +112,11 @@ def main(cfg):
     names = ["train"]
     if cfg.train.eval.holdout or cfg.data.train_on_val:
         names.append("val")
-    splits = {s: load_split(s, cfg.data[f"{s}_csv"]) for s in names}
+    canonicalize = cfg.data.get("canonicalize", False)
+    prep = canonicalized if canonicalize else (lambda split: split)
+    splits = {s: prep(load_split(s, cfg.data[f"{s}_csv"])) for s in names}
+    # Canonical captions make clause-reordering augmentation a no-op, so it is disabled.
+    reorder_p = 0.0 if canonicalize else cfg.aug.text.reorder_clauses_p
     if pairs_per_category is not None:
         splits["train"] = sample_pairs_by_category(splits["train"], pairs_per_category, cfg.seed)
     if cfg.data.limit is not None:
@@ -147,7 +151,7 @@ def main(cfg):
     else:
         # Vocabulary from the labelled training captions (and their rewrites) only.
         vocab_captions = list(train_split.captions)
-        if cfg.aug.text.reorder_clauses_p > 0:
+        if reorder_p > 0:
             vocab_captions += [p for c, cat in zip(train_split.captions, train_split.categories) for p in paraphrases(c, cat)]
         vocab = Vocab(vocab_captions, lowercase=cfg.model.text_encoder.get("lowercase", True))
         if cfg.model.get("init_from"):
@@ -180,13 +184,13 @@ def main(cfg):
         train_cfg.time_budget_min = remaining
     trainer = Trainer(model, loss_fn, vocab, train_cfg, device, image_mode, cfg.data.image_size, cfg.data.normalize,
                       cfg.seed, diagnostics_dir=out_dir)
-    aug = {"hflip_swap_lr": cfg.aug.image.hflip_swap_lr, "reorder_clauses_p": cfg.aug.text.reorder_clauses_p}
+    aug = {"hflip_swap_lr": cfg.aug.image.hflip_swap_lr, "reorder_clauses_p": reorder_p}
 
     eval_splits = {}
     if cfg.train.eval.train:
         eval_splits["train_fit"] = train_split
     if cfg.train.eval.holdout and not cfg.data.train_on_val:
-        eval_splits.update({"val": splits["val"], "val_para": paraphrased(splits["val"])})
+        eval_splits.update({"val": splits["val"], "val_para": prep(paraphrased(splits["val"]))})
     if cfg.train.early_stopping is not None:
         available = set()
         for name, split in eval_splits.items():
@@ -230,7 +234,7 @@ def main(cfg):
 
     if cfg.train.predict_test:
         # Test data is first accessed only after fitting and restoring selected weights.
-        test = load_split("test", cfg.data.test_csv)
+        test = prep(load_split("test", cfg.data.test_csv))
         _attach_sources(cfg, {"test": test}, device, False)
         test_logits = trainer.predict(test)
         np.save(out_dir / "test_logits.npy", test_logits)

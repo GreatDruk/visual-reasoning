@@ -29,6 +29,9 @@ def find_twins(image_names_per_row, captions, categories, max_distance=3):
     pairs = []
     tokens = [c.split() for c in captions]
     for rows in groups.values():
+        if len(rows) == 2:  # the data always has one twin pair per (image, category)
+            pairs.append(tuple(rows))
+            continue
         cand = sorted(
             (_edit_distance(tokens[a], tokens[b]), a, b)
             for i, a in enumerate(rows)

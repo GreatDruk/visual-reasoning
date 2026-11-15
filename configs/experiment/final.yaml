@@ -51,6 +51,6 @@ train:
   early_stopping: null
   predict_test: true
   postprocess:
-    twin_normalize: false
+    twin_normalize: true
 paths:
   submission: final_submission.csv
