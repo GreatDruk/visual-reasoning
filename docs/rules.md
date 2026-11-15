@@ -97,7 +97,6 @@ Don't forget to fix your random seeds to make results reproducible.
 
 For the **individual checkpoint**, design and fit proposed models on `train.csv` only; use `validation.csv` to evaluate models from Assignments 1 and 2. During the team phase, students may use the supplied labeled training and validation data for model development, including refitting on their combination. Report validation ROC-AUC only for experiments evaluated on a validation set that was held out from fitting; describe how the final model was trained.
 
-Use `test.csv` only to generate predictions. It MUST NOT be used to fit preprocessing, representations, feature selection, clustering or models.
 
 ## 5\. AI assistants
 

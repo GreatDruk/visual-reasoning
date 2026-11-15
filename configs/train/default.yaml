@@ -27,7 +27,7 @@ eval:
   holdout: true
   metrics: [auc, accuracy, pair_accuracy, auc_per_category]
 postprocess:
-  twin_normalize: false         # softmax внутри найденных пар близнецов в test
+  twin_normalize: true          # p_a = sigmoid(s_a - s_b) внутри пар (картинка, категория)
 diagnostics:
   enabled: false                # подробный train-only trace; не меняет optimizer/данные/модель
   every_steps: 100

@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import torch
 
-from .text_aug import novel_form, paraphrases, swap_left_right
+from .text_aug import canonical_form, novel_form, paraphrases, swap_left_right
 from .utils import resolve_path
 
 
@@ -76,6 +76,12 @@ def paraphrased(split, name=None):
     """Rule-based paraphrasing diagnostic; shares rules with training augmentation."""
     captions = [novel_form(c, cat) for c, cat in zip(split.captions, split.categories)]
     return Split(**{**split.__dict__, "name": name or f"{split.name}_para", "captions": captions})
+
+
+def canonicalized(split):
+    """Rewrite every caption into its canonical train form (data.canonicalize)."""
+    captions = [canonical_form(c, cat) for c, cat in zip(split.captions, split.categories)]
+    return Split(**{**split.__dict__, "captions": captions})
 
 
 def concat_splits(a, b, name):

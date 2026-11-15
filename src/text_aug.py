@@ -9,7 +9,9 @@ form of its category, which gives
 
 - `paraphrases`: training-time augmentation (clause reordering, allowed by the rules);
 - `novel_form`: a deterministic rewrite into a form absent from train/val, used only to
-  build `val_para`, a validation copy that measures generalisation to unseen phrasings.
+  build `val_para`, a validation copy that measures generalisation to unseen phrasings;
+- `canonical_form`: a deterministic rewrite of every form into one train form
+  (`data.canonicalize`), so the model never sees an unseen phrasing.
 
 Only rewrites with identical truth conditions are produced. In particular the definite
 forms ("the red cube is on the left side of the image") are never mapped to existential
@@ -176,6 +178,19 @@ def novel_form(caption, category):
     """Deterministic rewrite into a form absent from train/val, or the caption itself."""
     for form in paraphrases(caption, category):
         if _is_novel(form):
+            return form
+    return caption.strip().lower()
+
+
+def canonical_form(caption, category):
+    """Deterministic rewrite into one fixed train form: the first non-novel paraphrase.
+
+    Every equivalent surface form of a statement maps to the same string, and that
+    string's template occurs in train (checked on train/val/test: 0 exceptions, twins
+    never collapse). Used to remove the phrasing shift of test instead of learning it.
+    """
+    for form in paraphrases(caption, category):
+        if not _is_novel(form):
             return form
     return caption.strip().lower()
 

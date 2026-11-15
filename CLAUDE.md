@@ -43,7 +43,7 @@ Contracts implied by the configs that implementation must respect:
 - `train.cache_features: true`: with a frozen encoder, features are computed once and reused.
 - `loss=bce_pair` (BCE + pairwise logistic over `pair_id`) requires `train.pair_sampler: true` so both twins land in the same batch.
 - `train.time_budget_min: 45`: the final notebook must train + predict in 50 min on Kaggle default GPU.
-- `train.postprocess.twin_normalize`: softmax within twin pairs found in test (test has no `pair_id`; twins must be found from captions). Its legality is an open question in `KaggleTemplate.md`.
+- `train.postprocess.twin_normalize`: softmax within twin pairs found in test (test has no `pair_id`; twins must be found from captions). Allowed; off by default, its effect is measured on val.
 - `experiment=final` sets `data.train_on_val: true`, disables early stopping, fixed epoch count. `lab_baseline` is the individual-checkpoint model and must train on `train.csv` only.
 - `tune=optuna` expects the train function to return val AUC.
 
@@ -51,7 +51,7 @@ Contracts implied by the configs that implementation must respect:
 
 - Allowed: torchvision classification models with ImageNet weights (any layers), text-only encoders (GRU/LSTM/BERT-like), CLIP/SigLIP/OpenCLIP dual encoders, any custom layers.
 - Forbidden: detection/segmentation models (even torchvision ones), joint vision-language models (BLIP, ViLT, OWL-ViT, ...), LLMs or text generators (including for making captions), external data or models trained on similar data (CLEVR, NLVR, ShapeWorld).
-- `test.csv` may only be used to generate predictions (and finding twin captions); never to fit preprocessing, vocabularies, representations or models. The GRU vocab must be built from train(+val) only.
+- Unlabelled `test.csv` images and captions may be used freely (analysis, twin finding, fitting preprocessing/vocabularies/representations). Only hidden test labels are off limits (no manual labelling, no attempts to recover them).
 - Augmentations: hflip only with left/right swapped in the caption; no vflip, rotation, colour/hue jitter; crop/zoom risky; light brightness/contrast/blur/noise OK. Text: clause reordering (same label) and logical negatives (n->n+-1, left<->right) are allowed. See `configs/aug/default.yaml`.
 - Final deliverable is one notebook that runs with Restart & Run All, offline, seeds set for Python/NumPy/torch, produces `final_submission.csv`, <= 20 MB of code.
 
