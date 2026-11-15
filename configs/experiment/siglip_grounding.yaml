@@ -5,6 +5,7 @@ defaults:
   - override /model/text_encoder: gru
   - override /model/fusion: grounding
   - override /loss: bce_pair
+  - override /aug: default
 
 data:
   normalize: siglip
@@ -27,3 +28,9 @@ model:
   fusion:
     input_pool: null            # full 16x24 grid: val AUC 0.923 vs 0.906 with 2x2 pooling
     max_cells: [16, 24]
+
+aug:
+  image:
+    hflip_swap_lr: 0.0          # off until the flipped SigLIP cache is built and measured
+  text:
+    reorder_clauses_p: 0.3      # val_para AUC 0.703 -> 0.919, val AUC 0.923 -> 0.924
