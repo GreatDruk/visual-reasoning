@@ -1,4 +1,5 @@
-"""Training loop: AdamW + warmup/cosine, grad clipping, early stopping, time budget."""
+"""Training loop: AdamW + warmup/cosine, grad clipping, early stopping, time budget,
+optional step budget and step snapshots (see ``Trainer.fit``)."""
 
 import copy
 from contextlib import nullcontext
@@ -48,6 +49,8 @@ class Trainer:
                 self.scaler = torch.amp.GradScaler("cuda")
         self.best_epoch = None
         self.stop_reason = "epochs"
+        self.optimizer_steps = 0  # actual optimizer updates (a GradScaler skip is not a step)
+        self.processed_rows = 0   # training rows consumed by the updates of one fit
 
     def _make_optimizer(self):
         """Partition trainable tensors by encoder identity, without duplicate ownership."""
@@ -94,21 +97,45 @@ class Trainer:
         probs = 1 / (1 + np.exp(-logits))
         return evaluate_scores(probs, split.labels, split.categories, split.pair_ids), logits
 
-    def fit(self, train_split, eval_splits, aug, monitor="val_auc"):
+    def fit(self, train_split, eval_splits, aug, monitor="val_auc", step_callback=None):
         """Train; after each epoch evaluate every split in eval_splits ({name: Split}).
 
         Keeps the weights of the best epoch by `monitor` (e.g. "val_auc"), or the last
         epoch when early stopping is disabled; the kept epoch is in `self.best_epoch`.
         Returns the per-epoch history. If `time_budget_min` would cut a fixed-epoch
         refit (`early_stopping=null`) short, raises instead of returning a partial fit.
+
+        Step control (optional keys, absent/None preserves legacy behavior):
+        `cfg.max_steps` stops exactly after that many optimizer updates, even mid-epoch
+        (`stop_reason` becomes "max_steps"); a skipped AMP update is not an update and
+        does not count. The cosine horizon is `cfg.scheduler.total_steps`, or
+        `steps_per_epoch * epochs` when null, and is never retargeted by truncation, so
+        the LR at an absolute step is independent of split size and run length.
+
+        `step_callback(trainer, optimizer, scheduler, epoch, step)` runs at most once
+        per step (duplicates in `cfg.snapshot_steps` are ignored), after the update and
+        its diagnostics, at: step 0 (before any update, with the optimizer built and the
+        scheduler's initial LR set), every entry of `cfg.snapshot_steps`, and the
+        `cfg.max_steps` target. If the run ends at another step (epoch cap, early
+        stopping), it fires once more at that last step. `step` is the actual update
+        count (`self.optimizer_steps`), `epoch` is 0 at the step-0 call and the 1-based
+        epoch in progress afterwards. The callback may call predict() and leave the
+        model in eval; the trainer restores the previous train/eval mode afterwards but
+        does not save or restore RNG state. `self.processed_rows` counts the training
+        rows consumed; every history row reports `step`, `processed_rows` and
+        `completed_epoch` (False for an epoch cut short by `cfg.max_steps`).
         """
         cfg = self.cfg
+        self.optimizer_steps = 0
+        self.processed_rows = 0
         params = [p for p in self.model.parameters() if p.requires_grad]
         opt = self._make_optimizer()
         for group in opt.param_groups:
             log.info(f"optimizer {group['name']}: {sum(p.numel() for p in group['params'])} parameters, lr {group['lr']}")
         steps_per_epoch = math.ceil(len(train_split) / cfg.batch_size)
-        total = steps_per_epoch * cfg.epochs
+        total = cfg.scheduler.get("total_steps")
+        if total is None:
+            total = steps_per_epoch * cfg.epochs
         warmup = cfg.scheduler.get("warmup_steps")
         if warmup is None:
             warmup = steps_per_epoch * cfg.scheduler.get("warmup_epochs", 0)
@@ -121,6 +148,25 @@ class Trainer:
             return 1.0
 
         sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+        max_steps = cfg.get("max_steps")
+        if max_steps is not None and max_steps < 1:
+            raise ValueError("train.max_steps must be a positive optimizer-step target")
+        triggers = set(cfg.get("snapshot_steps") or [])
+        if max_steps is not None:
+            triggers.add(max_steps)
+        fired = set()
+
+        def fire(epoch):
+            """Invoke step_callback once per step, restoring the previous train/eval mode."""
+            if self.optimizer_steps in fired:
+                return
+            fired.add(self.optimizer_steps)
+            was_training = self.model.training
+            try:
+                step_callback(self, opt, sched, epoch, self.optimizer_steps)
+            finally:
+                self.model.train(was_training)
+
         es = cfg.get("early_stopping")
         patience = es.patience if es else None
         monitor = es.monitor if es else monitor
@@ -133,12 +179,15 @@ class Trainer:
                 raise ValueError("diagnostics_dir is required when training diagnostics are enabled")
             diagnostics = TrainingDiagnostics(self, train_split, diagnostic_cfg, self.diagnostics_dir, self.seed)
             diagnostics.probe(0, 0, "initial")
+        if step_callback is not None:
+            fire(0)  # before any update; optimizer and the scheduler's initial LR are set
         step = 0
 
         for epoch in range(1, cfg.epochs + 1):
             self.model.train()
             t0, losses = time.time(), []
-            for batch in train_batches(train_split, cfg.batch_size, self.rng, aug, cfg.pair_sampler):
+            truncated = False
+            for batch_index, batch in enumerate(train_batches(train_split, cfg.batch_size, self.rng, aug, cfg.pair_sampler), 1):
                 step += 1
                 observe = diagnostics is not None and diagnostics.should_capture(step)
                 with diagnostics.trace(train_split, batch, epoch, step, opt) if observe else nullcontext():
@@ -167,14 +216,23 @@ class Trainer:
                     stepped = True
                 if stepped:
                     sched.step()
+                    self.optimizer_steps += 1
                 if observe:
                     diagnostics.finish_step(logits, loss, batch, opt, stepped)
                     diagnostics.probe(epoch, step, "step")
+                self.processed_rows += len(batch["captions"])
+                if step_callback is not None and self.optimizer_steps in triggers:
+                    fire(epoch)
                 losses.append(loss.item())
+                if max_steps is not None and self.optimizer_steps >= max_steps:
+                    truncated = batch_index < steps_per_epoch
+                    break
 
             if diagnostics is not None and diagnostics.last_probe_step != step:
                 diagnostics.probe(epoch, step, "epoch_end")
-            row = {"epoch": epoch, "loss": float(np.mean(losses)), "epoch_sec": round(time.time() - t0, 1)}
+            row = {"epoch": epoch, "loss": float(np.mean(losses)), "epoch_sec": round(time.time() - t0, 1),
+                   "step": self.optimizer_steps, "processed_rows": self.processed_rows,
+                   "completed_epoch": not truncated}
             row.update({f"lr/{g['name']}": g["lr"] for g in opt.param_groups})
             for name, split in eval_splits.items():
                 metrics, _ = self.evaluate(split)
@@ -193,9 +251,16 @@ class Trainer:
             else:
                 bad_epochs += 1
             if improved or es is None:
-                # Fixed-epoch refit keeps the last completed epoch; otherwise the best one.
+                # Fixed-epoch refit keeps the current last state (at max_steps when the run
+                # is truncated); early stopping keeps the best monitored epoch instead.
                 self.best_epoch = epoch
                 best_state = copy.deepcopy(self.model.state_dict())
+            if truncated or (max_steps is not None and self.optimizer_steps >= max_steps):
+                # The requested target is reached: stop exactly here, and a time budget
+                # cannot call this fit incomplete.
+                self.stop_reason = "max_steps"
+                log.info(f"max_steps target reached after epoch {epoch}, step {self.optimizer_steps}")
+                break
             if es is not None and bad_epochs >= patience:
                 self.stop_reason = "early_stopping"
                 log.info(f"early stopping at epoch {epoch}, best {monitor} {best:.4f}")
@@ -212,6 +277,10 @@ class Trainer:
                     log.info(f"time budget reached after epoch {epoch} ({elapsed_min:.1f} min)")
                     break
 
+        if step_callback is not None and self.optimizer_steps not in fired:
+            # Final target: the run's last step when no earlier trigger covered it. Fired
+            # before the restore so model/optimizer/scheduler all describe that step.
+            fire(epoch)
         self.model.load_state_dict(best_state)
         if diagnostics is not None:
             diagnostics.probe(self.best_epoch, step, "restored")

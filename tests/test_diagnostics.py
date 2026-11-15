@@ -1,4 +1,4 @@
-"""CPU regressions for observation-only training diagnostics."""
+"""CPU regressions for observation-only training diagnostics and step-controlled training."""
 
 import copy
 import json
@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 import torch
 
 from test_pipeline import build_data_dir, run_train
-from src.data import ArraySource, load_split
+from src.data import ArraySource, load_split, subset
 from src.features import load_images
 from src.losses import TruthLoss
 from src.metrics import evaluate_scores
@@ -21,6 +21,30 @@ from src.models.model import VisualReasoningModel
 from src.models.text_encoders import GRUEncoder, Vocab
 from src.training import Trainer
 from src.utils import set_seed
+
+
+def build_case(tmp, activation="relu"):
+    """Shared fixture: tiny data dir, a small FiLM model and a CPU-ready train config."""
+    build_data_dir(tmp / "data", with_test=False)
+    split = load_split("train", tmp / "data/train.csv")
+    split.source = ArraySource(load_images(tmp / "data/train", split.image_names))
+    vocab = Vocab(split.captions)
+    set_seed(7)
+    encoder = TorchvisionEncoder("resnet18", None, "layer3", freeze=True, unfreeze_last_n_blocks=1)
+    text = GRUEncoder(len(vocab), embed_dim=8, hidden_dim=8, dropout=.2)
+    fusion = FiLMHead(encoder.out_channels, text.out_dim, num_blocks=1, hidden_channels=8,
+                      classifier_channels=16, classifier_hidden=16, readout="mlp", dropout=.2,
+                      readout_activation=activation)
+    model = VisualReasoningModel(text, fusion, encoder)
+    cfg = OmegaConf.create({
+        "amp": False, "epochs": 1, "batch_size": 2, "pair_sampler": True, "grad_clip": 1.,
+        "early_stopping": None, "time_budget_min": None,
+        "optimizer": {"lr": 3e-4, "image_encoder_lr": 3e-5, "weight_decay": 1e-4},
+        "scheduler": {"name": "constant", "warmup_epochs": 0},
+        "diagnostics": {"enabled": False, "every_steps": 1, "probe_pairs_per_category": 2,
+                        "channel_stats": True},
+    })
+    return model, vocab, split, cfg
 
 
 class TestTrainingDiagnostics(unittest.TestCase):
@@ -33,32 +57,10 @@ class TestTrainingDiagnostics(unittest.TestCase):
     def tearDownClass(cls):
         torch.set_num_threads(cls.old_threads)
 
-    def setup_case(self, tmp, activation="relu"):
-        build_data_dir(tmp / "data", with_test=False)
-        split = load_split("train", tmp / "data/train.csv")
-        split.source = ArraySource(load_images(tmp / "data/train", split.image_names))
-        vocab = Vocab(split.captions)
-        set_seed(7)
-        encoder = TorchvisionEncoder("resnet18", None, "layer3", freeze=True, unfreeze_last_n_blocks=1)
-        text = GRUEncoder(len(vocab), embed_dim=8, hidden_dim=8, dropout=.2)
-        fusion = FiLMHead(encoder.out_channels, text.out_dim, num_blocks=1, hidden_channels=8,
-                          classifier_channels=16, classifier_hidden=16, readout="mlp", dropout=.2,
-                          readout_activation=activation)
-        model = VisualReasoningModel(text, fusion, encoder)
-        cfg = OmegaConf.create({
-            "amp": False, "epochs": 1, "batch_size": 2, "pair_sampler": True, "grad_clip": 1.,
-            "early_stopping": None, "time_budget_min": None,
-            "optimizer": {"lr": 3e-4, "image_encoder_lr": 3e-5, "weight_decay": 1e-4},
-            "scheduler": {"name": "constant", "warmup_epochs": 0},
-            "diagnostics": {"enabled": False, "every_steps": 1, "probe_pairs_per_category": 2,
-                            "channel_stats": True},
-        })
-        return model, vocab, split, cfg
-
     def test_logging_preserves_weights_buffers_rng_and_alignment(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            model, vocab, split, cfg = self.setup_case(tmp)
+            model, vocab, split, cfg = build_case(tmp)
             outputs = []
             for enabled in (False, True):
                 directory = tmp / str(enabled)
@@ -101,7 +103,7 @@ class TestTrainingDiagnostics(unittest.TestCase):
             for activation in ("relu", "gelu"):
                 root = tmp / activation
                 root.mkdir()
-                model, vocab, split, cfg = self.setup_case(root, activation)
+                model, vocab, split, cfg = build_case(root, activation)
                 cfg.diagnostics.enabled = True
                 with torch.no_grad():
                     model.fusion.readout.mlp[0].weight.zero_()
@@ -159,7 +161,7 @@ class TestTrainingDiagnostics(unittest.TestCase):
             for setting, expected in ((None, [1/3, 2/3, 1]), (2, [.5, 1, 1]), (0, [1, 1, 1])):
                 root = Path(td) / str(setting)
                 root.mkdir()
-                model, vocab, split, cfg = self.setup_case(root)
+                model, vocab, split, cfg = build_case(root)
                 cfg.diagnostics.enabled = True
                 cfg.scheduler.warmup_epochs = 1
                 if setting is not None:
@@ -183,6 +185,139 @@ class TestTrainingDiagnostics(unittest.TestCase):
         self.assertEqual(summary["pair_accuracy"], .5)
         expected = torch.nn.functional.softplus(torch.tensor([-1., 0., 2.])).mean()
         self.assertAlmostEqual(summary["pair_logistic"], float(expected))
+
+
+class TestStepControls(unittest.TestCase):
+    """CPU regressions for max_steps truncation, absolute scheduler horizon and step_callback."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.old_threads = torch.get_num_threads()
+        torch.set_num_threads(2)
+
+    @classmethod
+    def tearDownClass(cls):
+        torch.set_num_threads(cls.old_threads)
+
+    def _train(self, root, model, vocab, split, cfg, *, epochs, max_steps=None,
+               snapshot_steps=(), step_callback=None):
+        root.mkdir(parents=True, exist_ok=True)
+        cfg = copy.deepcopy(cfg)
+        cfg.epochs = epochs
+        cfg.max_steps = max_steps
+        cfg.snapshot_steps = list(snapshot_steps)
+        cloned = copy.deepcopy(model)
+        cloned.train(model.training)  # FX GraphModule deepcopy resets child training flags.
+        trainer = Trainer(cloned, TruthLoss(), vocab, cfg, torch.device("cpu"),
+                          "images", [64, 96], seed=7)
+        set_seed(123)
+        history = trainer.fit(split, {}, {}, step_callback=step_callback)
+        return trainer, history
+
+    def test_max_steps_truncates_mid_epoch_and_returns_that_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            cfg.scheduler.name = "cosine"
+            cfg.scheduler.warmup_steps = 0
+            cfg.scheduler.total_steps = 6
+            fired, at_target, lrs = [], [], []
+            sampler_at_target = []
+
+            def snapshot(trainer, opt, sched, epoch, step):
+                fired.append(step)
+                lrs.append({g["name"]: g["lr"] for g in opt.param_groups})
+                if step == 5:
+                    at_target.append({k: v.detach().clone() for k, v in trainer.model.state_dict().items()})
+                    sampler_at_target.append(copy.deepcopy(trainer.rng.bit_generator.state))
+
+            trainer, history = self._train(tmp / "a", model, vocab, split, cfg, epochs=2, max_steps=5,
+                                           snapshot_steps=[2], step_callback=snapshot)
+            # 3 steps per epoch: the target stops after two batches of epoch 2.
+            self.assertEqual(fired, [0, 2, 5])
+            self.assertEqual(trainer.optimizer_steps, 5)
+            self.assertEqual(trainer.processed_rows, 10)
+            self.assertEqual(trainer.stop_reason, "max_steps")
+            self.assertEqual(trainer.rng.bit_generator.state, sampler_at_target[0])
+            self.assertEqual([(r["epoch"], r["step"], r["processed_rows"], r["completed_epoch"]) for r in history],
+                             [(1, 3, 6, True), (2, 5, 10, False)])
+            # The cosine horizon (6) is untouched by truncation: step 5 sits at 5/6 of the
+            # decay. A horizon retargeted to max_steps would report exactly 0 at step 5.
+            for group in ("task", "image_encoder"):
+                base = cfg.optimizer.lr if group == "task" else cfg.optimizer.image_encoder_lr
+                np.testing.assert_allclose([lr[group] / base for lr in lrs], [1., .75, .06698729810778])
+            # early_stopping=null returns exactly the state reached at the target step.
+            self.assertEqual(len(at_target), 1)
+            for key, tensor in trainer.model.state_dict().items():
+                self.assertTrue(torch.equal(at_target[0][key], tensor), key)
+            # The truncated fit is a prefix of an untruncated one at the same absolute step.
+
+            def checkpoint(trainer, opt, sched, epoch, step):
+                if step == 5:
+                    at_target.append({k: v.detach().clone() for k, v in trainer.model.state_dict().items()})
+
+            self._train(tmp / "b", model, vocab, split, cfg, epochs=2, snapshot_steps=[5],
+                        step_callback=checkpoint)
+            for key, tensor in at_target[1].items():
+                self.assertTrue(torch.equal(at_target[0][key], tensor), key)
+
+    def test_absolute_horizon_gives_equal_lr_across_split_sizes(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            cfg.scheduler.name = "cosine"
+            cfg.scheduler.warmup_steps = 3
+            cfg.scheduler.total_steps = 6
+            small = subset(split, np.isin(split.pair_ids, [11, 12]))  # 2 pairs -> 2 steps/epoch
+            trajectories = {}
+            for name, data, epochs in (("large", split, 2), ("small", small, 4)):
+                records = []
+
+                def snapshot(trainer, opt, sched, epoch, step, records=records):
+                    records.append((step, {g["name"]: g["lr"] for g in opt.param_groups}))
+
+                trainer, _ = self._train(tmp / name, model, vocab, data, cfg, epochs=epochs, max_steps=5,
+                                         snapshot_steps=[0, 1, 2, 3, 4, 5], step_callback=snapshot)
+                self.assertEqual(trainer.stop_reason, "max_steps")
+                trajectories[name] = records
+            # Overlapping triggers (0 in snapshot_steps, target in snapshot_steps) fire once each.
+            for name in ("large", "small"):
+                self.assertEqual([step for step, _ in trajectories[name]], [0, 1, 2, 3, 4, 5])
+            # Absolute warmup and horizon: the LR per absolute step is identical although
+            # steps per epoch (3 vs 2) and the epoch cap (2 vs 4) differ. The legacy
+            # epochs-derived totals (6 vs 8) would diverge from step 4 on.
+            self.assertEqual(trajectories["large"], trajectories["small"])
+            for group in ("task", "image_encoder"):
+                base = cfg.optimizer.lr if group == "task" else cfg.optimizer.image_encoder_lr
+                np.testing.assert_allclose([lr[group] / base for _, lr in trajectories["large"]],
+                                           [1/3, 2/3, 1., 1., .75, .25])
+
+    def test_callback_eval_leaves_training_state_intact(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            model, vocab, split, cfg = build_case(tmp)
+            val = load_split("val", tmp / "data/val.csv")
+            val.source = ArraySource(load_images(tmp / "data/val", val.image_names))
+            reference = {name: module.training for name, module in model.named_modules()}
+            modes = []
+
+            def snapshot(trainer, opt, sched, epoch, step):
+                before = {name: module.training for name, module in trainer.model.named_modules()}
+                trainer.evaluate(val)  # predict() leaves the model in eval
+                after = {name: module.training for name, module in trainer.model.named_modules()}
+                modes.append((step, before, after))
+
+            trainer, _ = self._train(tmp / "a", model, vocab, split, cfg, epochs=2, max_steps=4,
+                                     snapshot_steps=[1, 2, 3], step_callback=snapshot)
+            self.assertEqual([step for step, _, _ in modes], [0, 1, 2, 3, 4])
+            for step, before, after in modes:
+                self.assertEqual(before, reference, step)     # the trainer restored train mode
+                self.assertFalse(any(after.values()), step)   # although the callback left eval
+            # Training continued in train mode throughout: identical weights without callbacks.
+            plain, _ = self._train(tmp / "b", model, vocab, split, cfg, epochs=2, max_steps=4,
+                                   snapshot_steps=[1, 2, 3])
+            for key, tensor in trainer.model.state_dict().items():
+                self.assertTrue(torch.equal(plain.model.state_dict()[key], tensor), key)
 
 
 if __name__ == "__main__":

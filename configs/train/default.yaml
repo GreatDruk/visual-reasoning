@@ -1,4 +1,6 @@
 epochs: 20
+max_steps: null                # стоп ровно после N optimizer updates (можно в середине эпохи); null — без лимита
+snapshot_steps: []             # шаги optimizer updates для step_callback (плюс шаг 0 и финальный); дубликаты не вызываются
 batch_size: 128
 pair_sampler: true              # оба близнеца в одном батче (нужно для pair loss)
 optimizer:
@@ -10,6 +12,7 @@ scheduler:
   name: cosine
   warmup_epochs: 1
   warmup_steps: null           # null: warmup_epochs; иначе абсолютное число optimizer steps
+  total_steps: null            # горизонт cosine в optimizer steps; null — steps_per_epoch * epochs (как раньше)
 amp: true
 grad_clip: 1.0
 early_stopping:

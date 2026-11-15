@@ -162,7 +162,7 @@ class TrainingDiagnostics:
             stream.write(json.dumps(row, allow_nan=False) + "\n")
 
     def should_capture(self, step):
-        return step in (1, 10, 50) or step % self.cfg.every_steps == 0
+        return step in (1, 10, 50) or step in self.cfg.get("capture_steps", []) or step % self.cfg.every_steps == 0
 
     @contextmanager
     def trace(self, split, batch, epoch, step, optimizer):
