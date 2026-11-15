@@ -1,0 +1,32 @@
+# @package _global_
+# Slot-program branch over the frozen stage-2 checkpoint (val 0.9745). The slot
+# autoencoder is pretrained without labels on train+val+test features:
+#   uv run python -m src.slots_pretrain --out artefacts/slots/k11_v1
+# Supervision: TRAIN captions of every category (exact-N, exists, none, and,
+# more/fewer/as-many); evaluation routes only `route_ops` pairs through the branch.
+defaults:
+  - pair_best_stage2
+
+name_exp: debug_pair_slots_stage2
+model:
+  init_from: debug_count_on_F
+  fusion:
+    _target_: src.models.slot_program.PairSlotCountChoiceHead
+    train_count_only: false
+    slot_checkpoint: artefacts/slots/k11_v1/slot_autoencoder.pt
+    executor_dim: 128
+    executor_hidden: 256
+    executor_dropout: 0.1
+    relation_sharpness: 8.0
+    use_slot_vectors: true
+    slot_weight: 1.0
+    base_weight: 1.0
+    program_weight: 1.0
+    route_ops: [exact, more, fewer, same]
+    finetune_slots: false
+train:
+  epochs: 20
+  time_budget_min: 40
+  early_stopping:
+    monitor: val_auc
+    patience: 5

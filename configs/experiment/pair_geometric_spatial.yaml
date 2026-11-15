@@ -1,0 +1,9 @@
+# @package _global_
+# Options 1+2: use relation-gated count mass for spatial/absence inference too.
+defaults:
+  - pair_geometric_existence
+
+name_exp: debug_pair_geometric_spatial
+model:
+  fusion:
+    route_spatial: true

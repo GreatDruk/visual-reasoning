@@ -16,6 +16,8 @@ from .features import preprocess
 from .metrics import evaluate_scores
 from .models.pair_choice import token_difference_mask
 from .models.count_distribution import encode_count_inputs
+from .models.geometric_count import caption_pair_key, encode_comparison_inputs, encode_geometric_inputs
+from .models.slot_program import encode_program_inputs
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +93,17 @@ class Trainer:
                            "difference_mask": token_difference_mask(tokens, lengths, pairs).to(self.device)}
         if getattr(self.model, "requires_count_inputs", False):
             pair_kwargs["count_inputs"] = encode_count_inputs(batch["captions"], self.vocab, self.device)
+        if getattr(self.model, "requires_geometry_inputs", False):
+            geometry = encode_geometric_inputs(batch["captions"], self.vocab, self.device,
+                include_existence=self.model.training and self.model.fusion.existence_weight > 0)
+            if not self.model.training and self.model.fusion.comparison_route != "off":
+                comparison = encode_comparison_inputs(batch["captions"], self.vocab, self.device,
+                                                     source=self.model.fusion.comparison_source)
+                if comparison is not None:
+                    geometry = dict(geometry or {}, comparison=comparison)
+            pair_kwargs["geometry_inputs"] = geometry
+        if getattr(self.model, "requires_program_inputs", False):
+            pair_kwargs["program_inputs"] = encode_program_inputs(batch["captions"], self.device)
         with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
             return self.model(x, tokens, lengths, **pair_kwargs).float()
 
@@ -101,7 +114,8 @@ class Trainer:
             batch_size = self.cfg.batch_size
         self.model.eval()
         out = np.empty(len(split), dtype=np.float32)
-        for batch in eval_batches(split, batch_size, pairwise=getattr(self.model, "requires_pairs", False)):
+        keys = [caption_pair_key(c) for c in split.captions] if getattr(self.model.fusion, "caption_pairing", False) else None
+        for batch in eval_batches(split, batch_size, pairwise=getattr(self.model, "requires_pairs", False), pairing_keys=keys):
             out[batch["rows"]] = self._forward(split, batch).cpu().numpy()
         return out
 

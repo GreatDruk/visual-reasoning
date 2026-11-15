@@ -234,13 +234,13 @@ def train_batches(split, batch_size, rng, aug, pair_sampler=True):
         yield batch
 
 
-def eval_batches(split, batch_size, pairwise=False):
+def eval_batches(split, batch_size, pairwise=False, pairing_keys=None):
     if pairwise:
         if batch_size < 2 or batch_size % 2:
             raise ValueError("pair-choice evaluation requires an even batch_size >= 2")
         names = [split.image_names[i] for i in split.img_idx]
         # Use precisely the metadata available at test time, never labels/pair_ids.
-        pairs = find_twins(names, split.captions, split.categories)
+        pairs = find_twins(names, split.captions, split.categories if pairing_keys is None else pairing_keys)
         if not np.array_equal(np.sort(pairs.flatten()), np.arange(len(split))):
             raise ValueError(f"{split.name}: pair-choice inference needs a twin for every row")
         for i in range(0, len(pairs), batch_size // 2):
