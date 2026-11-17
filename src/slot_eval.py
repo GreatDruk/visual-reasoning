@@ -14,7 +14,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from sklearn.metrics import roc_auc_score
 import torch
@@ -26,6 +25,7 @@ from .metrics import evaluate_scores
 from .models.model import VisualReasoningModel
 from .models.slot_program import OP_NAMES, parse_program
 from .models.text_encoders import Vocab
+from .train import instantiate
 from .training import Trainer
 from .utils import get_device, resolve_path
 
@@ -70,6 +70,24 @@ def paired_bootstrap(a, b, labels, pairs, repeats=2000, seed=0):
     return res
 
 
+def image_bootstrap(candidate, baseline, labels, img_idx, repeats=300, seed=42):
+    """Bootstrap *images* rather than captions/twins (captions share scene content)."""
+    rng = np.random.default_rng(seed)
+    ids = np.unique(img_idx)
+    blocks = [np.flatnonzero(img_idx == i) for i in ids]
+    deltas = []
+    for _ in range(repeats):
+        chosen = rng.integers(len(ids), size=len(ids))
+        rows = np.concatenate([blocks[j] for j in chosen])
+        if len(np.unique(labels[rows])) != 2:
+            continue
+        deltas.append(roc_auc_score(labels[rows], candidate[rows]) -
+                      roc_auc_score(labels[rows], baseline[rows]))
+    return {"delta": float(roc_auc_score(labels, candidate) - roc_auc_score(labels, baseline)),
+            "delta_ci95": np.quantile(deltas, [.025, .975]).round(6).tolist(),
+            "sampled_images": len(ids), "iterations": len(deltas)}
+
+
 def mix(base, slot, pairs, pair_ops, route, base_weight, slot_weight=1.):
     out = base.copy()
     routed = np.array([all(OP_NAMES[o] in route for o in ops) for ops in pair_ops])
@@ -86,12 +104,14 @@ def main(argv=None):
     p.add_argument("--reference", type=Path, action="append", default=[],
                    help="saved run whose val logits serve as an alternative base / reference")
     p.add_argument("--repeats", type=int, default=1000)
+    p.add_argument("--semantic-sweep", action="store_true",
+                   help="test reference marginalisation, reference existence and exclusive attributes on val")
     p.add_argument("--device", default="auto")
     args = p.parse_args(argv)
     run = resolve_path(args.run)
     device = get_device(args.device)
     cfg, vocab, model, trainer = build(run, device)
-    split = canonicalized(load_split("val", resolve_path("data/val.csv")))
+    split = canonicalized(load_split("val", cfg.data.val_csv))
     base_dir = resolve_path(args.features_dir) / cache_key(cfg.model.image_encoder, cfg.data)
     names = json.loads((base_dir / "val.json").read_text())
     pos = {n: i for i, n in enumerate(names)}
@@ -104,7 +124,10 @@ def main(argv=None):
     head.base_weight, head.slot_weight = 0., 1.
     slot = trainer.predict(split)
     pairs = pair_groups(split)
-    ops = np.array([parse_program(c).op for c in split.captions])
+    programs = [parse_program(c) for c in split.captions]
+    if any(program is None for program in programs):
+        raise ValueError("semantic sweep requires supported canonical validation captions")
+    ops = np.array([program.op for program in programs])
     pair_ops = [tuple(ops[r]) for r in pairs]
     labels, cats = split.labels, split.categories
 
@@ -119,6 +142,35 @@ def main(argv=None):
         for rname, route in routes.items():
             for w in (0., 1.):
                 variants[f"{bname}+slot[{rname}] base_w={w:g}"] = mix(base, slot, pairs, pair_ops, route, w)
+    if args.semantic_sweep:
+        # Keep the pretrained checkpoint fixed. Only the executor's interpretation
+        # of the SAME per-slot predictions changes in this read-only diagnostic.
+        semantic_modes = (
+            ("ref_exists", "barycenter", True, False),
+            ("marginal", "marginal", False, False),
+            ("marginal+ref_exists", "marginal", True, False),
+            ("marginal+ref_exists+exclusive", "marginal", True, True),
+            ("marginal+ref_exists+coupled", "marginal", True, False),
+            ("marginal+ref_exists+exclusive+coupled", "marginal", True, True),
+        )
+        head.route_mask[:] = True
+        head.base_weight, head.slot_weight = 0., 1.
+        for semantic, mode, require_ref, exclusive in semantic_modes:
+            head.slot_executor.reference_mode = mode
+            head.slot_executor.require_reference_exists = require_ref
+            head.slot_executor.exclusive_attributes = exclusive
+            head.slot_executor.comparison_mode = "coupled" if "coupled" in semantic else "independent"
+            variant_slot = trainer.predict(split)
+            for bname, base in bases.items():
+                for rname, route in ("all", OP_NAMES), ("count+cmp", routes["count+cmp"]):
+                    variants[f"{bname}+slot[{rname}] semantic={semantic}"] = mix(
+                        base, variant_slot, pairs, pair_ops, route, base_weight=1., slot_weight=1.)
+        # Restore the original model semantics.
+        head.slot_executor.reference_mode = "barycenter"
+        head.slot_executor.require_reference_exists = False
+        head.slot_executor.exclusive_attributes = False
+        head.slot_executor.comparison_mode = "independent"
+
     summary = {}
     for name, logits in variants.items():
         m = evaluate_scores(1 / (1 + np.exp(-logits.astype(np.float64))), labels, cats, split.pair_ids)
@@ -126,21 +178,38 @@ def main(argv=None):
     focus_pairs = {c: pairs[cats[pairs[:, 0]] == c] for c in FOCUS}
     same = np.array([OP_NAMES[ops[a]] == "same" or OP_NAMES[ops[b]] == "same" for a, b in pairs])
     focus_pairs["comparison/as_many"] = pairs[(cats[pairs[:, 0]] == "comparison") & same]
-    exact_n = np.array([parse_program(split.captions[a]).a == parse_program(split.captions[b]).a for a, b in pairs])
+    exact_n = np.array([programs[a].a == programs[b].a for a, b in pairs])
     focus_pairs["counting/number_twins"] = pairs[(cats[pairs[:, 0]] == "counting") & exact_n]
     focus_pairs["counting/filter_twins"] = pairs[(cats[pairs[:, 0]] == "counting") & ~exact_n]
     focus_pairs["overall"] = pairs
     bootstraps = {}
-    for name in [n for n in variants if "[count+cmp]" in n or "[all]" in n]:
+    for name in [n for n in variants if ("[count+cmp]" in n or "[all]" in n) and "semantic=" not in n]:
         bname = name.split("+")[0]
         bootstraps[name] = {c: paired_bootstrap(variants[name], bases[bname], labels, fp, args.repeats)
                             for c, fp in focus_pairs.items() if len(fp)}
     report = {"run": str(run), "metrics": summary, "paired_bootstrap_vs_base": bootstraps}
+    if args.semantic_sweep:
+        # Selection on the same validation set is exploratory, never an unbiased
+        # estimate of the best-of-many improvement.
+        semantic = [n for n in variants if "semantic=" in n]
+        strongest = max(semantic, key=lambda n: summary[n]["auc"])
+        parent = strongest.split("+slot[")[0]
+        default = f"{parent}+slot[all] base_w=1"
+        if default not in variants:
+            default = parent
+        report["semantic_sweep"] = {
+            "best_on_this_val": strongest, "reference": default,
+            "grouped_image_bootstrap": image_bootstrap(variants[strongest], variants[default],
+                                                        labels, split.img_idx, min(args.repeats, 500)),
+            "warning": "Variant chosen using the same val; CIs are exploratory, confirm on independent scenes",
+        }
+        print("semantic best", strongest, "vs", default,
+              report["semantic_sweep"]["grouped_image_bootstrap"])
     (run / "slot_eval.json").write_text(json.dumps(report, indent=2))
     cols = ["auc", "pair_accuracy"] + [f"auc/{c}" for c in FOCUS]
     print("variant".ljust(48) + "".join(c.replace("auc/", "")[:12].rjust(13) for c in cols))
     for name, m in summary.items():
-        print(name.ljust(48) + "".join(f"{m[c]:13.4f}" for c in cols))
+        print(name.ljust(48) + "".join(f"{m.get(c, float('nan')):13.4f}" for c in cols))
 
 
 if __name__ == "__main__":
