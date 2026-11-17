@@ -34,16 +34,20 @@ class VisualReasoningModel(nn.Module):
         return self
 
     def forward(self, image, tokens, lengths, twin_index=None, difference_mask=None, count_inputs=None,
-                geometry_inputs=None, program_inputs=None):
+                geometry_inputs=None, program_inputs=None, paired_images=False):
+        program_only = self.training and self.requires_program_inputs
         if self.requires_pairs:
-            if twin_index is None or difference_mask is None:
+            if twin_index is None or (difference_mask is None and not program_only):
                 raise ValueError("pair-choice fusion requires twin_index and difference_mask")
             # Encode each image only once; text remains in the original batch order.
-            image = image[twin_index[:, 0].to(image.device)]
+            if not paired_images:
+                image = image[twin_index[:, 0].to(image.device)]
         if self.image_encoder is not None:
             image = self.image_encoder(image)
         if not self.spatial and image.dim() == 4:
             image = image.mean(dim=(2, 3))
+        if program_only:
+            return self.fusion(image, None, twin_index, None, program_inputs=program_inputs)
         text = self.text_encoder(tokens, lengths)
         if self.requires_count_inputs:
             count_text = None

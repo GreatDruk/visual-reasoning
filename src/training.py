@@ -46,7 +46,7 @@ class Trainer:
         self.amp_dtype = None
         self.scaler = None
         if train_cfg.amp and device.type == "cuda":
-            if torch.cuda.is_bf16_supported():
+            if torch.cuda.get_device_capability(device)[0] >= 8 and torch.cuda.is_bf16_supported():
                 self.amp_dtype = torch.bfloat16
             else:
                 self.amp_dtype = torch.float16
@@ -62,34 +62,51 @@ class Trainer:
         """Partition trainable tensors by encoder identity, without duplicate ownership."""
         encoder = self.model.image_encoder
         image_ids = {id(p) for p in encoder.parameters()} if encoder is not None else set()
-        image, task = [], []
-        for p in self.model.parameters():
-            if p.requires_grad:
-                (image if id(p) in image_ids else task).append(p)
+        image, slots, task = [], [], []
         cfg = self.cfg.optimizer
+        slot_lr = cfg.get("slot_encoder_lr")
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if id(p) in image_ids:
+                image.append(p)
+            elif slot_lr is not None and name.startswith("fusion.slot_encoder."):
+                slots.append(p)
+            else:
+                task.append(p)
         image_lr = cfg.get("image_encoder_lr")
         groups = []
         if image:
             groups.append({"name": "image_encoder", "params": image, "lr": cfg.lr if image_lr is None else image_lr})
+        if slots:
+            groups.append({"name": "slot_encoder", "params": slots, "lr": slot_lr})
         if task:
             groups.append({"name": "task", "params": task, "lr": cfg.lr})
         return torch.optim.AdamW(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     def _inputs(self, split, batch):
-        x = split.source.get(batch["img_idx"], batch["flip"]).to(self.device, non_blocking=True)
+        rows = batch["twin_index"][:, 0].numpy() if getattr(self.model, "requires_pairs", False) else slice(None)
+        x = split.source.get(batch["img_idx"][rows], batch["flip"][rows]).to(self.device, non_blocking=True)
         if self.image_mode == "images":
             x = preprocess(x, self.image_size, self.normalize)
         else:
             x = x.float()
-        tokens, lengths = self.vocab.encode_batch(batch["captions"])
-        return x, tokens.to(self.device), lengths
+        return x
 
     def _forward(self, split, batch):
-        x, tokens, lengths = self._inputs(split, batch)
+        x = self._inputs(split, batch)
+        if self.model.training and getattr(self.model, "requires_program_inputs", False):
+            # The slot head trains directly on parsed filters and skips the frozen text/base towers.
+            programs = encode_program_inputs(batch["captions"], self.device)
+            with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
+                return self.model(x, None, None, twin_index=batch["twin_index"],
+                                  program_inputs=programs, paired_images=True).float()
+        tokens, lengths = self.vocab.encode_batch(batch["captions"])
         pair_kwargs = {}
         if getattr(self.model, "requires_pairs", False):
             pairs = batch["twin_index"]
             pair_kwargs = {"twin_index": pairs,
+                           "paired_images": True,
                            "difference_mask": token_difference_mask(tokens, lengths, pairs).to(self.device)}
         if getattr(self.model, "requires_count_inputs", False):
             pair_kwargs["count_inputs"] = encode_count_inputs(batch["captions"], self.vocab, self.device)
@@ -105,7 +122,7 @@ class Trainer:
         if getattr(self.model, "requires_program_inputs", False):
             pair_kwargs["program_inputs"] = encode_program_inputs(batch["captions"], self.device)
         with torch.autocast(self.device.type, dtype=self.amp_dtype, enabled=self.amp_dtype is not None):
-            return self.model(x, tokens, lengths, **pair_kwargs).float()
+            return self.model(x, tokens.to(self.device), lengths, **pair_kwargs).float()
 
     @torch.no_grad()
     def predict(self, split, batch_size=None):
@@ -173,7 +190,8 @@ class Trainer:
         steps_per_epoch = math.ceil(len(train_split) / cfg.batch_size)
         total = cfg.scheduler.get("total_steps")
         if total is None:
-            total = steps_per_epoch * cfg.epochs
+            horizon = cfg.scheduler.get("total_epochs") or cfg.epochs
+            total = steps_per_epoch * horizon
         warmup = cfg.scheduler.get("warmup_steps")
         if warmup is None:
             warmup = steps_per_epoch * cfg.scheduler.get("warmup_epochs", 0)

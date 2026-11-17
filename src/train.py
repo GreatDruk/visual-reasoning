@@ -32,6 +32,8 @@ TRUSTED_TARGETS = ["src.*", "torch.optim.*"]
 
 def instantiate(cfg, **kwargs):
     """hydra instantiate restricted to this package's classes (Hydra 1.4 execution whitelist)."""
+    if hydra.__version__.startswith("1.3."):
+        return _instantiate(cfg, **kwargs)
     return _instantiate(cfg, _execution_whitelist_=TRUSTED_TARGETS, **kwargs)
 
 
@@ -58,7 +60,7 @@ def _attach_sources(cfg, splits, device, need_flip):
             names_path = path.with_suffix(".json")
             flip_path = base / f"{name}_flip.npy"
             flip_names = flip_path.with_suffix(".json")
-            use_flip = need_flip and name in ("train", "val")
+            use_flip = need_flip and (name == "train" or (name == "val" and cfg.data.train_on_val))
             if not path.exists() or not names_path.exists():
                 break
             cached_names = json.loads(names_path.read_text())
@@ -93,7 +95,7 @@ def _attach_sources(cfg, splits, device, need_flip):
             kw = dict(size=cfg.data.image_size, normalize=cfg.data.normalize, device=device)
             arr = cache_features(spatial_encoder, image_dirs[name], split.image_names, base / f"{name}.npy", **kw)
             flipped = None
-            if need_flip and name in ("train", "val"):
+            if need_flip and (name == "train" or (name == "val" and cfg.data.train_on_val)):
                 flipped = cache_features(spatial_encoder, image_dirs[name], split.image_names, base / f"{name}_flip.npy", flip=True, **kw)
             split.source = ArraySource(arr, flipped)
         else:

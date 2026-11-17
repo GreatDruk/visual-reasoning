@@ -7,12 +7,14 @@ optimizer:
   _target_: torch.optim.AdamW
   lr: 3.0e-4
   image_encoder_lr: null
+  slot_encoder_lr: null        # set e.g. 1e-5 for gentle supervised slot fine-tuning
   weight_decay: 1.0e-4
 scheduler:
   name: cosine
   warmup_epochs: 1
   warmup_steps: null           # null: warmup_epochs; иначе абсолютное число optimizer steps
   total_steps: null            # горизонт cosine в optimizer steps; null — steps_per_epoch * epochs (как раньше)
+  total_epochs: null           # горизонт в эпохах, если нужен более короткий повтор обучения
 amp: true
 grad_clip: 1.0
 early_stopping:
