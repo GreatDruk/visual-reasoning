@@ -9,3 +9,4 @@ norm: true                      # apply the trunk's final LayerNorm to the token
 spatial: true
 freeze: true
 cache_dir: null                 # null: HF cache; Kaggle: local path to the mounted weights
+weights_file: null              # optional explicit offline OpenCLIP checkpoint

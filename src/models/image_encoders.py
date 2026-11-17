@@ -70,12 +70,20 @@ class ClipImageEncoder(nn.Module):
     (`spatial=True`) or their mean [B, C]. The text tower is discarded.
     """
 
-    def __init__(self, model_name, pretrained, image_size, out_layer=-1, norm=True, spatial=True, freeze=True, cache_dir=None):
+    def __init__(self, model_name, pretrained, image_size, out_layer=-1, norm=True, spatial=True,
+                 freeze=True, cache_dir=None, weights_file=None):
         super().__init__()
         import open_clip
 
         if not freeze:
             raise NotImplementedError("ClipImageEncoder is frozen-only (features are cached)")
+        if weights_file:
+            from ..utils import resolve_path
+
+            checkpoint = resolve_path(weights_file)
+            if not checkpoint.is_file():
+                raise FileNotFoundError(checkpoint)
+            pretrained = str(checkpoint)
         model = open_clip.create_model(model_name, pretrained=pretrained, cache_dir=cache_dir)
         trunk = getattr(model.visual, "trunk", None)
         if trunk is None or not hasattr(trunk, "forward_intermediates"):
