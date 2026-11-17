@@ -7,70 +7,63 @@ BASE_RUN: run with val_/test_ ids+logits (sub_geometric_full).
 Pairs come from (image, category) groups: no labels, no pair_id.
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, ".")
 import numpy as np
-import pandas as pd
 from sklearn.metrics import roc_auc_score
 
-from src.data import ArraySource, canonicalized, load_split
+from scripts.kaggle_slots import blend, cached_split, write_submission
 from src.features import cache_key
-from src.models.slot_program import OP_NAMES, parse_program
 from src.slot_eval import build
-from src.twins import find_twins
 from src.utils import get_device, resolve_path
 
 p = argparse.ArgumentParser()
 p.add_argument("slot_run", type=Path)
 p.add_argument("base_run", type=Path)
 p.add_argument("out_csv", type=Path)
-p.add_argument("--features-dir", default="/Users/platon/Documents/kaggle-visual-reasoning/artefacts/features")
+p.add_argument("--features-dir", default="artefacts/features")
+p.add_argument("--skip-val", action="store_true", help="skip holdout diagnostics for a train+val refit")
+p.add_argument("--reference-mode", choices=("barycenter", "marginal"), default="barycenter")
+p.add_argument("--reference-exists", action="store_true")
+p.add_argument("--exclusive-attributes", action="store_true")
+p.add_argument("--comparison-mode", choices=("independent", "coupled"), default="independent")
+p.add_argument("--base-weight", type=float, default=1.)
+p.add_argument("--slot-weight", type=float, default=1.)
 args = p.parse_args()
 
 cfg, vocab, model, trainer = build(resolve_path(args.slot_run), get_device("auto"))
 head = model.fusion
 head.route_mask[:] = True
 head.base_weight, head.slot_weight = 0.0, 1.0
-feat_dir = Path(args.features_dir) / cache_key(cfg.model.image_encoder, cfg.data)
+head.slot_executor.reference_mode = args.reference_mode
+head.slot_executor.require_reference_exists = args.reference_exists
+head.slot_executor.exclusive_attributes = args.exclusive_attributes
+head.slot_executor.comparison_mode = args.comparison_mode
+feat_dir = resolve_path(args.features_dir) / cache_key(cfg.model.image_encoder, cfg.data)
+data = resolve_path(cfg.paths.data_dir)
 
 
 def run(name):
-    split = canonicalized(load_split(name, resolve_path(f"data/{name}.csv")))
-    names = json.loads((feat_dir / f"{name}.json").read_text())
-    pos = {n: i for i, n in enumerate(names)}
-    split.source = ArraySource(np.load(feat_dir / f"{name}.npy", mmap_mode="r"), None,
-                               np.array([pos[n] for n in split.image_names]))
+    split = cached_split(data, feat_dir, name)
     slot = trainer.predict(split)
     base_ids = np.load(args.base_run / f"{name}_ids.npy")
     base_logits = np.load(args.base_run / f"{name}_logits.npy")
     bpos = {r: i for i, r in enumerate(base_ids)}
     base = base_logits[[bpos[i] for i in split.ids]]
-    pairs = find_twins([split.image_names[i] for i in split.img_idx], split.captions, split.categories)
-    assert sorted(pairs.flatten().tolist()) == list(range(len(split))), "every row needs a twin"
-    ops = np.array([parse_program(c).op for c in split.captions])
-    routed = np.array([all(OP_NAMES[o] in OP_NAMES for o in ops[r]) for r in pairs])
-    a, b = pairs[:, 0], pairs[:, 1]
-    margin = np.where(routed, (slot[a] - slot[b]) + (base[a] - base[b]), base[a] - base[b])
-    mixed = np.empty(len(split))
-    mixed[a], mixed[b] = margin / 2, -margin / 2
-    print(f"{name}: rows {len(split)}, pairs {len(pairs)}, routed {routed.mean():.4f}")
-    return split, base, mixed
+    return split, base, blend(split, base, slot, base_weight=args.base_weight, slot_weight=args.slot_weight)
 
 
-val, val_base, val_mixed = run("val")
-print("val AUC base", round(roc_auc_score(val.labels, val_base), 4), "| base+slot", round(roc_auc_score(val.labels, val_mixed), 4))
-cats = pd.Series(val.categories)
-print({c: round(roc_auc_score(val.labels[cats == c], val_mixed[cats == c]), 4) for c in sorted(set(val.categories))})
+if not args.skip_val:
+    if cfg.data.train_on_val:
+        p.error("use --skip-val for models fitted on train+val")
+    val, val_base, val_mixed = run("val")
+    print("val AUC base", round(roc_auc_score(val.labels, val_base), 4),
+          "| base+slot", round(roc_auc_score(val.labels, val_mixed), 4))
+    print({c: round(roc_auc_score(val.labels[val.categories == c], val_mixed[val.categories == c]), 4)
+           for c in sorted(set(val.categories))})
 
 test, _, test_mixed = run("test")
-lookup = dict(zip(test.ids, test_mixed))
-sample = pd.read_csv(resolve_path("data/sample_submission.csv"))
-col = [c for c in sample.columns if c != "id"][0]
-# twin-normalized probability: p_a = sigmoid(s_a - s_b) = sigmoid(margin)
-logit = np.array([lookup[i] for i in sample.id]) * 2
-sample[col] = 1 / (1 + np.exp(-logit))
-sample.to_csv(args.out_csv, index=False)
-print("wrote", args.out_csv, len(sample))
+write_submission(data, test, test_mixed, args.out_csv)
+print("wrote", args.out_csv, len(test))
