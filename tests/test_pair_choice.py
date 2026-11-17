@@ -211,6 +211,8 @@ class TestReadOnlyCache(unittest.TestCase):
             np.testing.assert_array_equal(split.source.get(np.array([0, 1]), np.array([False, True])).numpy(),
                                           np.stack([features[2], -features[1]]))
             self.assertFalse(split.source.array.flags.writeable)
+            split.source.array._mmap.close()
+            split.source.flipped._mmap.close()
 
 
 class TestPairCLI(unittest.TestCase):

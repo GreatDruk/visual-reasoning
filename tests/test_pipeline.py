@@ -353,6 +353,7 @@ class TestFeatureCache(unittest.TestCase):
                 ref = enc(x).numpy()
             self.assertEqual(arr.shape, ref.shape)
             np.testing.assert_allclose(np.asarray(arr, dtype=np.float32), ref, rtol=2e-3, atol=2e-3)
+            del arr  # release the memory map before removing the file on Windows
 
 
 class TestRecovery(unittest.TestCase):

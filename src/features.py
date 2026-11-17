@@ -8,6 +8,7 @@ cache does not have to fit in RAM (a 20x30 ResNet layer3 map is ~1.2 MB per imag
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -24,7 +25,10 @@ log = logging.getLogger(__name__)
 def load_images(image_dir, names):
     """Read JPEGs into one uint8 array [N, 3, H, W] (all images are 160x240)."""
     image_dir = resolve_path(image_dir)
-    arrays = [np.asarray(Image.open(image_dir / n).convert("RGB")) for n in tqdm(names, desc=f"load {image_dir.name}")]
+    arrays = []
+    for name in names:
+        with Image.open(image_dir / name) as image:
+            arrays.append(np.asarray(image.convert("RGB")))
     return np.stack(arrays).transpose(0, 3, 1, 2).copy()
 
 
@@ -55,7 +59,8 @@ def cache_key(encoder_cfg, data_cfg):
 
 
 @torch.no_grad()
-def cache_features(encoder, image_dir, names, out_path, size, normalize, device, flip=False, batch_size=64):
+def cache_features(encoder, image_dir, names, out_path, size, normalize, device, flip=False, batch_size=64,
+                   amp=False):
     """Run `encoder` over the images and write a float16 [N, C, h, w] .npy file.
 
     Returns a read-only memmap of the file. An existing file with a matching names list
@@ -65,21 +70,30 @@ def cache_features(encoder, image_dir, names, out_path, size, normalize, device,
     names_path = out_path.with_suffix(".json")
     if out_path.exists() and names_path.exists() and json.loads(names_path.read_text()) == list(names):
         return np.load(out_path, mmap_mode="r")
+    if not len(names) or batch_size < 1:
+        raise ValueError("feature extraction requires images and a positive batch size")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    images = load_images(image_dir, names)
     encoder = encoder.to(device).eval()
-    first = encoder(preprocess(torch.from_numpy(images[:1]).to(device), size, normalize, flip))
-    shape = (len(names), *first.shape[1:])
     tmp_path = out_path.with_name(out_path.stem + ".tmp.npy")
-    out = np.lib.format.open_memmap(tmp_path, mode="w+", dtype=np.float16, shape=shape)
-    for start in tqdm(range(0, len(names), batch_size), desc=f"encode {out_path.name}"):
-        x = torch.from_numpy(images[start : start + batch_size]).to(device)
-        feats = encoder(preprocess(x, size, normalize, flip))
-        out[start : start + len(x)] = feats.half().cpu().numpy()
+    out = None
+    with ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(load_images, image_dir, names[:batch_size])
+        for start in tqdm(range(0, len(names), batch_size), desc=f"encode {out_path.name}"):
+            images = pending.result()
+            next_start = start + batch_size
+            if next_start < len(names):
+                pending = pool.submit(load_images, image_dir, names[next_start:next_start + batch_size])
+            x = torch.from_numpy(images).to(device)
+            with torch.autocast(device.type, dtype=torch.float16, enabled=amp and device.type == "cuda"):
+                feats = encoder(preprocess(x, size, normalize, flip))
+            if out is None:
+                shape = (len(names), *feats.shape[1:])
+                out = np.lib.format.open_memmap(tmp_path, mode="w+", dtype=np.float16, shape=shape)
+            out[start : start + len(x)] = feats.half().cpu().numpy()
     out.flush()
     del out
-    tmp_path.rename(out_path)
+    tmp_path.replace(out_path)
     names_path.write_text(json.dumps(list(names)))
     log.info(f"cached {shape} -> {out_path}")
     return np.load(out_path, mmap_mode="r")
