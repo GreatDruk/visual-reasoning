@@ -6,12 +6,13 @@ import sys
 
 import numpy as np
 import torch
-from scipy.special import logit
+from scipy.special import expit, logit
 from sklearn.metrics import roc_auc_score
 
 sys.path.insert(0, str(Path.cwd()))
 from learned_center_fusion import Fusion, N_ATTRS
 from native_centers import GROUPS, read_rows
+from src.models.slot_program import WORD_INDEX
 from src.scene_posterior import _draws, _execute
 from src.twins import find_twins
 
@@ -19,7 +20,31 @@ from src.twins import find_twins
 ROOT = Path("artefacts/research")
 
 
-def hypotheses(programs, pairs, p, xy, attributes, evidence, offsets, draws):
+def promote_candidate(p, attributes, evidence, cue, gain):
+    color, bounds, score = cue
+    confidence = expit(score)
+    if confidence < .80:
+        return p
+    boxes = evidence[:, 1 + N_ATTRS:5 + N_ATTRS]
+    centers = boxes[:, :2] + .5 * boxes[:, 2:]
+    inside = ((centers >= bounds[:2]) & (centers < bounds[2:])).all(-1)
+    channel = int(np.flatnonzero(GROUPS[1] == WORD_INDEX[color])[0])
+    matching = inside & (attributes[1][:, channel] >= .55)
+    main = np.flatnonzero(matching & (p >= .65))
+    if len(main) != 1:
+        return p
+    distance = np.linalg.norm((centers-centers[main[0]])*[240,160], axis=1)
+    dense = evidence[:, 5+N_ATTRS]
+    eligible = matching & (dense >= .56) & (p < .65) & (distance >= 5)
+    if not eligible.any():
+        return p
+    index = np.argmax(np.where(eligible, .5*dense + .5*p, -1))
+    output = p.copy()
+    output[index] = max(p[index], gain * confidence)
+    return output
+
+
+def hypotheses(programs, pairs, p, xy, attributes, evidence, offsets, draws, crop_cue=None):
     u = _draws(len(p), 8, 42, draws)
     present = u[..., 0] < p
     codes = np.zeros_like(present, dtype=np.int32)
@@ -48,11 +73,19 @@ def hypotheses(programs, pairs, p, xy, attributes, evidence, offsets, draws):
     dense = evidence[:, 5 + N_ATTRS]
     dense_shapes = evidence[:, -3:]
     agreement = dense_shapes[np.arange(len(p))[None, :], chosen_shape]
+    crop_score = np.zeros(len(count), np.float32)
+    if crop_cue is not None:
+        color, bounds, score = crop_cue
+        center = origin + .5 * extent
+        inside = ((center >= bounds[:2]) & (center < bounds[2:])).all(-1)
+        hue = 1 << WORD_INDEX[color]
+        multiple = ((present & inside) & ((codes & hue) != 0)).sum(1) >= 2
+        crop_score = np.clip(score, -4., 4.) * multiple
     features = np.column_stack((
         count, abs(count - p.sum()), (present * p).sum(1), (present * (p < .4)).sum(1),
         (present * (p >= .8)).sum(1), (present * dense).sum(1), duplicates,
         (present * log_probability).sum(1), (present * agreement * dense).sum(1),
-        (count < 3) | (count > 10), (present * np.sqrt(area.clip(0))).sum(1) * 10,
+        (count < 3) | (count > 10), (present * np.sqrt(area.clip(0))).sum(1) * 10, crop_score,
     )).astype(np.float32)
     features -= features.mean(axis=0)
     base = (1.3 * (linked.sum(1) - len(pairs))).astype(np.float32)
@@ -60,7 +93,7 @@ def hypotheses(programs, pairs, p, xy, attributes, evidence, offsets, draws):
 
 
 @torch.inference_mode()
-def tables(split, model, draws):
+def tables(split, model, draws, crop_cues=None, promotion=0.):
     frame, scenes, captions, programs = read_rows(split)
     path = ROOT / "learned_fusion16" / f"{split}.npz"
     with np.load(path) as archive:
@@ -69,7 +102,7 @@ def tables(split, model, draws):
     offsets = model.relation_offset.detach().numpy()
     result = []
     blocks = [list(range(i, min(i + 128, len(x)))) for i in range(0, len(x), 128)]
-    rows = list(scenes.values())
+    names, rows = list(scenes), list(scenes.values())
     for block in blocks:
         enc = model.encode(x[block], xy[block], valid[block])
         p, attributes = model.slot_logits(enc)
@@ -83,9 +116,14 @@ def tables(split, model, draws):
             if not len(p_i) or not len(pairs):
                 result.append((idx, pairs, None))
                 continue
+            color_cue = crop_cues.get(names[i]) if crop_cues is not None else None
+            attr = [arr[j, mask] for arr in probabilities]
+            evidence = x[i, mask].numpy()
+            if promotion and color_cue is not None:
+                p_i = promote_candidate(p_i, attr, evidence, color_cue, promotion)
             record = hypotheses(
                 [programs[k] for k in idx], pairs, p_i, enc["position"][j, mask].numpy(),
-                [arr[j, mask] for arr in probabilities], x[i, mask].numpy(), offsets, draws,
+                attr, evidence, offsets, draws, color_cue,
             )
             result.append((idx, pairs, record))
     return frame, result
