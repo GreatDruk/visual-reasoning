@@ -3,7 +3,7 @@
 Slot Attention (Locatello et al., 2020) groups the 16x24 SigLIP block-8 tokens into
 K slots; an MLP spatial-broadcast decoder reconstructs every (standardized) token as
 an alpha-weighted mixture of per-slot predictions (Seitzer et al., ICLR 2023). Only
-the reconstruction loss trains it, so unlabelled test images may be used.
+the reconstruction loss trains it on the selected labeled image splits.
 
 Slots start from K learned queries (BO-QSA, Jia et al., ICLR 2023): the output is
 deterministic, and the straight-through final iteration keeps the queries trainable.
@@ -41,6 +41,8 @@ class SlotAttention(nn.Module):
     def step(self, slots, k, v):
         q = self.to_q(self.norm_slots(slots))
         logits = torch.einsum("bkd,bnd->bkn", q, k) / math.sqrt(self.dim)
+        if logits.dtype == torch.float16:
+            logits = logits.float()
         attn = logits.softmax(1) + self.eps            # slots compete for every token
         weights = attn / attn.sum(-1, keepdim=True)    # weighted mean over tokens
         updates = torch.einsum("bkn,bnd->bkd", weights, v)

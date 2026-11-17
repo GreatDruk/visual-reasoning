@@ -1,7 +1,8 @@
 """Unsupervised slot-autoencoder pretraining on cached frozen features.
 
-Uses every cached image of train, val and test (plus the cached horizontal flips of
-train/val) and no captions or labels: the only objective is token reconstruction.
+Uses train images (and optionally their flips). For final team fitting, train+val
+may be selected explicitly, but test images must never fit representations.
+No captions or labels are needed: the objective is token reconstruction.
 
     uv run python -m src.slots_pretrain --features-dir <dir> --out artefacts/slots/v1
 """
@@ -22,10 +23,13 @@ from .utils import get_device, resolve_path, set_seed
 
 log = logging.getLogger(__name__)
 DEFAULT_KEY = "clip_ViT-B-16-SigLIP2-256_webli_block8norm_256x384_siglip"
-SPLITS = ("train", "val", "test", "train_flip", "val_flip")
+SPLITS = ("train", "train_flip")
+ALLOWED_SPLITS = frozenset(("train", "train_flip", "val", "val_flip"))
 
 
 def open_caches(base, splits=SPLITS):
+    if not splits or len(set(splits)) != len(splits) or not set(splits) <= ALLOWED_SPLITS:
+        raise ValueError("slot pretraining requires unique train/val splits; test is inference only")
     arrays = {}
     for name in splits:
         path = base / f"{name}.npy"
@@ -43,7 +47,7 @@ class Sampler:
         self.arrays = list(arrays.values())
         self.sizes = np.array([len(a) for a in self.arrays])
         self.offsets = np.concatenate([[0], np.cumsum(self.sizes)])
-        self.batch_size = batch_size
+        self.batch_size = min(batch_size, self.offsets[-1])
         self.rng = np.random.default_rng(seed)
         self.pool = ThreadPoolExecutor(1)
         self.pending = self.pool.submit(self._read)
@@ -61,6 +65,9 @@ class Sampler:
         batch = self.pending.result()
         self.pending = self.pool.submit(self._read)
         return batch
+
+    def close(self):
+        self.pool.shutdown()
 
 
 def save_checkpoint(model, path, extra=None):
@@ -116,7 +123,7 @@ def main(argv=None):
     p.add_argument("--decoder-hidden", type=int, default=512)
     p.add_argument("--decoder-layers", type=int, default=3)
     p.add_argument("--target-dim", type=int, default=256, help="PCA components to reconstruct (0: all)")
-    p.add_argument("--amp", type=int, default=1, help="bf16 autocast on cuda/mps")
+    p.add_argument("--amp", type=int, default=1, help="mixed precision on CUDA")
     p.add_argument("--steps", type=int, default=10000)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--lr", type=float, default=4e-4)
@@ -125,7 +132,13 @@ def main(argv=None):
     p.add_argument("--device", default="auto")
     p.add_argument("--log-every", type=int, default=250)
     p.add_argument("--splits", default=",".join(SPLITS))
+    p.add_argument("--require-caches", action="store_true", help="fail if any selected cache is missing")
     args = p.parse_args(argv)
+    requested_splits = tuple(s.strip() for s in args.splits.split(",") if s.strip())
+    if not requested_splits or any(s not in ALLOWED_SPLITS for s in requested_splits):
+        raise ValueError("slot pretraining may fit only train/val features, never test features")
+    if "train" not in requested_splits:
+        raise ValueError("slot pretraining must include train")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
     set_seed(args.seed)
@@ -133,31 +146,41 @@ def main(argv=None):
     out = resolve_path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     base = resolve_path(args.features_dir) / args.key
-    arrays = open_caches(base, args.splits.split(","))
+    arrays = open_caches(base, requested_splits)
+    if "train" not in arrays or (args.require_caches and set(arrays) != set(requested_splits)):
+        raise FileNotFoundError(f"missing required feature caches in {base}: {set(requested_splits) - set(arrays)}")
     log.info("caches: " + ", ".join(f"{k} {v.shape}" for k, v in arrays.items()))
-    first = next(iter(arrays.values()))
+    first = arrays["train"]
     model = SlotAutoencoder(first.shape[1], first.shape[2:], args.slots, args.slot_dim, args.input_dim,
                             args.iterations, args.decoder_hidden, args.decoder_layers,
                             args.target_dim or None)
     rng = np.random.default_rng(args.seed)
-    sample = np.asarray(first[np.sort(rng.choice(len(first), 256, replace=False))])
-    model.fit_normalization(torch.from_numpy(sample))
     model.to(device)
+    sample = np.asarray(first[np.sort(rng.choice(len(first), min(len(first), 256), replace=False))])
+    model.fit_normalization(torch.from_numpy(sample).to(device))
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1, (s + 1) / args.warmup)
                                               * .5 * (1 + math.cos(math.pi * min(s, args.steps) / args.steps)))
     sampler = Sampler(arrays, args.batch_size, args.seed)
+    amp = bool(args.amp) and device.type == "cuda"
+    bf16 = amp and torch.cuda.get_device_capability(device)[0] >= 8 and torch.cuda.is_bf16_supported()
+    dtype = torch.bfloat16 if bf16 else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=amp and not bf16)
     history, losses, t0 = [], [], time.time()
     for step in range(1, args.steps + 1):
         model.train()
         x = sampler.next().to(device)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bool(args.amp) and device.type != "cpu"):
+        with torch.autocast(device.type, dtype=dtype, enabled=amp):
             loss = model(x)["loss"]
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
-        sched.step()
+        previous_scale = scaler.get_scale()
+        scaler.step(opt)
+        scaler.update()
+        if scaler.get_scale() >= previous_scale:
+            sched.step()
         losses.append(loss.item())
         if step % args.log_every == 0 or step == args.steps:
             row = {"step": step, "loss": float(np.mean(losses)), "lr": sched.get_last_lr()[0],
@@ -167,13 +190,10 @@ def main(argv=None):
             log.info(json.dumps(row))
         if step % 4000 == 0:
             save_checkpoint(model, out / "slot_autoencoder.pt", {"args": vars(args), "history": history})
+    sampler.close()
     save_checkpoint(model, out / "slot_autoencoder.pt", {"args": vars(args), "history": history})
     (out / "history.json").write_text(json.dumps({"args": vars(args), "history": history,
                                                   "train_min": (time.time() - t0) / 60}, indent=2))
-    if "val" in arrays:
-        names = json.loads((base / "val.json").read_text())[:8]
-        mask_overlays(model, arrays["val"][:8], [resolve_path("data/val") / n for n in names],
-                      out / "val_masks.png", device)
     log.info(f"saved {out}")
 
 
