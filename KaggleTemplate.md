@@ -20,7 +20,8 @@ uv run python -m src.train experiment=pair_geometric_stage2 model.init_from=debu
 - [x] Ветка подсчёта (`src/models/count_distribution.py`)
 - [x] Геометрическая ветка spatial_counting (`src/models/geometric_count.py`)
 - [ ] Присвоить ID и заархивировать конфиги прогонов из таблицы ниже (пока это debug-прогоны без `configs/archive`)
-- [ ] Поднять counting (0.856), spatial (0.930), spatial_negation (0.896)
+- [x] Объектные слоты (Slot Attention): spatial 0.991, spatial_negation 0.995, comparison 0.991
+- [ ] Поднять counting (0.943) и spatial_counting (0.941): слияние объектов в плотных сценах — 16 слотов, дообучение слотов, супервизия числа объектов
 - [ ] Финальный notebook на трёхэтапной модели: train+val, SigLIP2 офлайн, Restart & Run All на Kaggle Default GPU ≤ 50 мин
 - [ ] Moodle-пакет: команда, вклад, ID сабмита, ноутбук, final_submission.csv, таблица экспериментов (архитектура, val Accuracy + AUC, runtime, seed), версии библиотек
 
