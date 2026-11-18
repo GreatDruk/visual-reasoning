@@ -73,12 +73,20 @@ class SlotAutoencoder(nn.Module):
     """
 
     def __init__(self, in_channels=768, grid=(16, 24), num_slots=11, slot_dim=128,
-                 input_dim=256, iterations=3, decoder_hidden=512, decoder_layers=3, target_dim=None):
+                 input_dim=256, iterations=3, decoder_hidden=512, decoder_layers=3, target_dim=None,
+                 background_slots=(), count_threshold=.5, count_sharpness=10.):
         super().__init__()
         self.config = dict(in_channels=in_channels, grid=tuple(grid), num_slots=num_slots,
                            slot_dim=slot_dim, input_dim=input_dim, iterations=iterations,
                            decoder_hidden=decoder_hidden, decoder_layers=decoder_layers,
-                           target_dim=target_dim)
+                           target_dim=target_dim, background_slots=tuple(background_slots),
+                           count_threshold=count_threshold, count_sharpness=count_sharpness)
+        if any(not 0 <= k < num_slots for k in background_slots):
+            raise ValueError("background slot index out of range")
+        # Slots excluded from the object count (they absorb the floor / walls).
+        self.register_buffer("object_slots", torch.tensor([k not in background_slots for k in range(num_slots)]),
+                             persistent=False)
+        self.count_threshold, self.count_sharpness = count_threshold, count_sharpness
         h, w = grid
         self.grid = (h, w)
         self.num_slots = num_slots
@@ -129,6 +137,12 @@ class SlotAutoencoder(nn.Module):
                 "pooled": torch.einsum("bkn,bnc->bkc", weights, tokens),
                 "position": weights @ self.xy, "area": mass.squeeze(-1) / attn.shape[-1]}
 
+    def object_count(self, attn):
+        """Soft number of occupied object slots, [B]: a slot is occupied when it wins
+        some token outright (max over tokens of its slot-softmax attention)."""
+        peak = attn[:, self.object_slots].amax(-1)
+        return ((peak - self.count_threshold) * self.count_sharpness).sigmoid().sum(-1)
+
     def decode(self, slots):
         """slots [B, K, D] -> reconstruction [B, N, target_dim], alpha masks [B, K, N]."""
         out = self.decoder(slots[:, :, None] + self.decoder_pos[None, None])
@@ -142,6 +156,20 @@ class SlotAutoencoder(nn.Module):
         enc.update(reconstruction=recon, alpha=alpha,
                    loss=F.mse_loss(recon.float(), target) * target.shape[-1] / self.target_proj.shape[0])
         return enc
+
+
+def expand_slot_state(state, num_slots, generator=None):
+    """Checkpoint state for a model with more slots: copy the learned queries, add
+    new ones drawn at the existing query scale (decoder and attention are K-agnostic)."""
+    state = dict(state)
+    queries = state["slot_attention.queries"]
+    extra = num_slots - len(queries)
+    if extra < 0:
+        raise ValueError("cannot shrink the number of slots")
+    if extra:
+        noise = torch.randn(extra, queries.shape[1], generator=generator) * queries.std()
+        state["slot_attention.queries"] = torch.cat([queries, noise.to(queries)])
+    return state
 
 
 def load_slot_autoencoder(path, map_location="cpu"):
