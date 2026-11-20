@@ -265,7 +265,7 @@ def detector_eval(split_name, name):
     from kaggle_suite_common import table_predictions
     offset = head.relation_offset.detach().cpu().numpy()
     scores = joint(split, table_predictions(head, table, device), offset)
-    if matrix is None and FLIP_TTA:
+    if name == "r50_img" and FLIP_TTA:
         # Horizontal-flip view: detect on the mirrored image, mirror boxes back, average caption scores.
         flipped = mirror_table(infer_table(model, MirroredSplit(split), None, f"{name}/{split_name}/flip"))
         scores = .5 * (scores + joint(split, table_predictions(head, flipped, device), offset))
