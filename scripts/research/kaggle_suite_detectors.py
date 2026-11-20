@@ -265,27 +265,49 @@ def detector_eval(split_name, name):
     from kaggle_suite_common import table_predictions
     offset = head.relation_offset.detach().cpu().numpy()
     scores = joint(split, table_predictions(head, table, device), offset)
-    if name == "r50_img" and FLIP_TTA:
-        # Horizontal-flip view: detect on the mirrored image, mirror boxes back, average caption scores.
-        flipped = mirror_table(infer_table(model, MirroredSplit(split), None, f"{name}/{split_name}/flip"))
-        scores = .5 * (scores + joint(split, table_predictions(head, flipped, device), offset))
+    if name == "r50_img":
+        # Test-time views: detect on a mirrored and/or shifted image, map boxes back to the
+        # original frame and average caption scores over all views (plain view included).
+        views = [scores]
+        for dx, dy, flip in TTA_VIEWS:
+            seen = infer_table(model, ViewSplit(split, dx, dy, flip), None, f"{name}/{split_name}/{dx}{dy}{int(flip)}")
+            views.append(joint(split, table_predictions(head, view_table(seen, dx, dy, flip), device), offset))
+        scores = np.mean(views, axis=0)
     record(name, split, scores)
 
 
-FLIP_TTA = True
+# (dx, dy, mirrored) in pixels. A 2 px shift is half of the stride-4 detector grid.
+# Val, r50_img fit on train: 1 view AUC 0.998744, + flip 0.999220, all four 0.999529.
+TTA_VIEWS = ((0, 0, True), (2, 2, False), (2, 2, True))
 
 
-class MirroredSplit:
-    """Split view whose images are mirrored left-right; everything else is delegated."""
+class ViewSplit:
+    """Split whose images are optionally mirrored, then shifted right/down by (dx, dy) pixels."""
 
-    def __init__(self, split):
-        self._split = split
+    def __init__(self, split, dx=0, dy=0, flip=False):
+        self._split, self.dx, self.dy, self.flip = split, dx, dy, flip
 
     def __getattr__(self, attr):
         return getattr(self._split, attr)
 
     def images(self, indices, device):
-        return self._split.images(indices, device).flip(-1)
+        x = self._split.images(indices, device)
+        if self.flip:
+            x = x.flip(-1)
+        if self.dx or self.dy:
+            x = F.pad(x, (self.dx, 0, self.dy, 0), mode="replicate")[..., :HEIGHT, :WIDTH]
+        return x.contiguous(memory_format=torch.channels_last)
+
+
+def view_table(table, dx, dy, flip):
+    """Undo the shift, then the mirror, of a table detected on a ViewSplit image."""
+    x, xy, valid = (a.copy() for a in table)
+    box = 1 + sum(len(g) for g in GROUPS)
+    x[..., box] -= dx / WIDTH
+    x[..., box + 1] -= dy / HEIGHT
+    xy[..., 0] -= 2 * dx / WIDTH
+    xy[..., 1] -= 2 * dy / HEIGHT
+    return mirror_table((x, xy, valid)) if flip else (x, xy, valid)
 
 
 def mirror_table(table):
