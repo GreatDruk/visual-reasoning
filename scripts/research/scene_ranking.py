@@ -143,14 +143,15 @@ def pack(frame, scenes):
     return tuple(torch.from_numpy(np.stack(rows)) for rows in (features, base, keep, good))
 
 
-def fit(data, seed):
-    features, base, linked, correct = data
+def fit(data, seed, device="cpu"):
+    features, base, linked, correct = (tensor.to(device) for tensor in data)
     gen = torch.Generator().manual_seed(seed)
-    coef = torch.nn.Parameter(torch.zeros(features.shape[-1]))
+    coef = torch.nn.Parameter(torch.zeros(features.shape[-1], device=device))
     optimizer = torch.optim.AdamW([coef], lr=.014)
     for epoch in range(12):
         losses = []
         for idx in torch.randperm(len(features), generator=gen).split(96):
+            idx = idx.to(device)
             shift = features[idx] @ (2.0 * coef.tanh())
             u = (base[idx] + shift.clamp(-9, 9)).exp()[..., None]
             mass = (u * linked[idx]).sum(1)
@@ -170,7 +171,7 @@ def fit(data, seed):
             losses.append(float(loss.detach()))
         if epoch in (0, 5, 11):
             print("train epoch", epoch + 1, "MML", round(float(np.mean(losses)), 5), flush=True)
-    return (2 * coef.detach().tanh()).numpy()
+    return (2 * coef.detach().tanh()).cpu().numpy()
 
 
 def evaluate(frame, scenes, coef):
