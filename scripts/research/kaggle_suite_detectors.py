@@ -13,7 +13,7 @@ from kaggle_suite_common import (
     record, save, say, setup, tick, tune_batch, write_json,
 )
 from learned_center_fusion import Fusion
-from native_centers import CenterDetector, GRID, HEIGHT, STRIDE, WIDTH, loss_for, mask_for, place_behind
+from native_centers import CenterDetector, GRID, GROUPS, HEIGHT, STRIDE, WIDTH, loss_for, mask_for, place_behind
 from resnet_centers_ablation import ResNetCenters
 
 DETECTORS = {
@@ -263,8 +263,38 @@ def detector_eval(split_name, name):
     head = Fusion(load(INPUT / "scene_silhouette.pt")).to(device)
     head.load_state_dict(load(WEIGHTS / f"{name}_head.pt"))
     from kaggle_suite_common import table_predictions
-    record(name, split, joint(split, table_predictions(head, table, device),
-                              head.relation_offset.detach().cpu().numpy()))
+    offset = head.relation_offset.detach().cpu().numpy()
+    scores = joint(split, table_predictions(head, table, device), offset)
+    if matrix is None and FLIP_TTA:
+        # Horizontal-flip view: detect on the mirrored image, mirror boxes back, average caption scores.
+        flipped = mirror_table(infer_table(model, MirroredSplit(split), None, f"{name}/{split_name}/flip"))
+        scores = .5 * (scores + joint(split, table_predictions(head, flipped, device), offset))
+    record(name, split, scores)
+
+
+FLIP_TTA = True
+
+
+class MirroredSplit:
+    """Split view whose images are mirrored left-right; everything else is delegated."""
+
+    def __init__(self, split):
+        self._split = split
+
+    def __getattr__(self, attr):
+        return getattr(self._split, attr)
+
+    def images(self, indices, device):
+        return self._split.images(indices, device).flip(-1)
+
+
+def mirror_table(table):
+    """Map a table detected on mirrored images back to original coordinates."""
+    x, xy, valid = (a.copy() for a in table)
+    box = 1 + sum(len(g) for g in GROUPS)  # columns: x0, y0, w, h normalised by image size
+    x[..., box] = 1 - x[..., box] - x[..., box + 2]
+    xy[..., 0] = -xy[..., 0]
+    return x, xy, valid
 
 
 def pasted_recall():
