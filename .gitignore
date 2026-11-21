@@ -1,6 +1,9 @@
 /data/
 /assessment-of-logical-statements-in-an-image-text-problem.zip
 /artefacts/*
+/docs/.research/
+/inputs/
+/.work/
 __*__
 .venv
 .*cache
