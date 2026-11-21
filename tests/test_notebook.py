@@ -127,3 +127,22 @@ def test_notebook_rejects_the_old_runtime_before_starting_any_jobs(monkeypatch):
     monkeypatch.setitem(sys.modules, "src", old)
     with pytest.raises(AssertionError, match="Update the runtime dataset"):
         exec(compile(source, "base.ipynb/run", "exec"), {})
+
+
+def test_runtime_overlay_keeps_foundation_weights_in_the_input_dataset(bootstrap):
+    inputs, working, execute = bootstrap
+    unpack(inputs / "original")
+    overlay = inputs / "runtime"
+    (overlay / "foundations").mkdir(parents=True)
+    content = b"checksummed frozen weights"
+    (overlay / "foundations/model.pt").write_bytes(content)
+    (overlay / "runtime.json").write_text(
+        json.dumps(
+            dict(version=1, files={"foundations/model.pt": hashlib.sha256(content).hexdigest()})
+        ),
+        encoding="utf8",
+    )
+    project = execute()
+    assert execute.namespace["foundations"] == overlay / "foundations"
+    assert not (project / "foundations").exists()
+    assert not list(working.rglob("*.pt"))
