@@ -9,9 +9,10 @@ from pathlib import Path
 from .runtime import immutable_inputs
 
 
-def build(project, inputs, output):
+def build(project, inputs, output, code_only=False):
     project = Path(project).resolve()
-    inputs, manifest = immutable_inputs(inputs)
+    if not code_only:
+        inputs, manifest = immutable_inputs(inputs)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     files = {
@@ -20,9 +21,14 @@ def build(project, inputs, output):
         for p in (project / folder).rglob("*")
         if p.is_file() and "__pycache__" not in p.parts
     }
-    files.update(
-        {"inputs/" + p.relative_to(inputs).as_posix(): p for p in inputs.rglob("*") if p.is_file()}
-    )
+    if not code_only:
+        files.update(
+            {
+                "inputs/" + p.relative_to(inputs).as_posix(): p
+                for p in inputs.rglob("*")
+                if p.is_file()
+            }
+        )
     hashes = {}
     with zipfile.ZipFile(output.with_suffix(".tmp"), "w") as z:
         for name, path in sorted(files.items()):
@@ -35,7 +41,10 @@ def build(project, inputs, output):
                 if path.suffix in (".py", ".yaml", ".json")
                 else zipfile.ZIP_STORED,
             )
-        z.writestr("package.json", json.dumps(dict(version=1, files=hashes), indent=2))
+        z.writestr(
+            "runtime.json" if code_only else "package.json",
+            json.dumps(dict(version=1, files=hashes), indent=2),
+        )
     with zipfile.ZipFile(output.with_suffix(".tmp")) as z:
         if z.testzip():
             raise ValueError("Archive CRC failed")
@@ -48,5 +57,10 @@ if __name__ == "__main__":
     p.add_argument("--project", type=Path, default=Path("."))
     p.add_argument("--inputs", type=Path, default=Path("inputs"))
     p.add_argument("--output", type=Path, default=Path("artefacts/kaggle/base.zip"))
+    p.add_argument(
+        "--code-only",
+        action="store_true",
+        help="Small runtime overlay for an existing immutable input dataset",
+    )
     a = p.parse_args()
-    build(a.project, a.inputs, a.output)
+    build(a.project, a.inputs, a.output, a.code_only)

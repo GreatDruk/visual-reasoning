@@ -51,6 +51,7 @@ def bootstrap(tmp_path, monkeypatch):
         namespace = {}
         exec(compile(source, "base.ipynb/bootstrap", "exec"), namespace)
         assert namespace["data"] == competition
+        execute.namespace = namespace
         return namespace["project"]
 
     return inputs, working, execute
@@ -96,3 +97,22 @@ def test_zip_bootstrap_rejects_paths_outside_the_project(bootstrap):
     with pytest.raises(AssertionError, match="Unsafe archive path"):
         execute()
     assert not (working / "escape.py").exists()
+
+
+def test_runtime_overlay_updates_code_without_copying_model_inputs(bootstrap):
+    inputs, working, execute = bootstrap
+    original = unpack(inputs / "original")
+    overlay = inputs / "runtime"
+    overlay.mkdir()
+    source = b'"""Updated code."""\n'
+    (overlay / "src").mkdir()
+    (overlay / "src/__init__.py").write_bytes(source)
+    (overlay / "runtime.json").write_text(
+        json.dumps(dict(version=1, files={"src/__init__.py": hashlib.sha256(source).hexdigest()})),
+        encoding="utf-8",
+    )
+    project = execute()
+    assert project == working / "runtime_project"
+    assert (project / "src/__init__.py").read_bytes() == source
+    assert execute.namespace["inputs"] == original / "inputs"
+    assert not (project / "inputs").exists()
