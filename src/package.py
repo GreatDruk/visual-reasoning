@@ -9,7 +9,9 @@ from pathlib import Path
 from .runtime import immutable_inputs
 
 
-def build(project, inputs, output, code_only=False, foundation_runs=None):
+def build(
+    project, inputs, output, code_only=False, foundation_runs=None, assets=None, anchors=None
+):
     project = Path(project).resolve()
     if not code_only:
         inputs, manifest = immutable_inputs(inputs)
@@ -75,6 +77,22 @@ def build(project, inputs, output, code_only=False, foundation_runs=None):
             )
         if set(foundation_runs) != {"convnext", "resnet"}:
             raise ValueError("Both fixed foundation roles are required")
+    if assets or anchors:
+        if foundation_manifest is None:
+            raise ValueError("Extra inputs require a foundation manifest")
+        for registry, items in [("assets", assets or {}), ("anchors", anchors or {})]:
+            foundation_manifest[registry] = {}
+            for name, path in items.items():
+                if not name.isidentifier():
+                    raise ValueError("Input role must be an identifier")
+                path = Path(path)
+                filename = f"{registry}_{name}{path.suffix}"
+                files["foundations/" + filename] = path
+                with path.open("rb") as stream:
+                    foundation_manifest["files"][filename] = hashlib.file_digest(
+                        stream, "sha256"
+                    ).hexdigest()
+                foundation_manifest[registry][name] = filename
     with zipfile.ZipFile(output.with_suffix(".tmp"), "w") as z:
         for name, path in sorted(files.items()):
             with path.open("rb") as stream:
@@ -118,6 +136,16 @@ if __name__ == "__main__":
         metavar="ROLE=RESULT_RUN",
         help="Package an explicit full train-only run for downstream research",
     )
+    p.add_argument("--asset", action="append", default=[], metavar="ROLE=PATH")
+    p.add_argument("--anchor", action="append", default=[], metavar="ROLE=NPZ")
     a = p.parse_args()
     runs = dict(item.split("=", 1) for item in a.foundation)
-    build(a.project, a.inputs, a.output, a.code_only, runs or None)
+    build(
+        a.project,
+        a.inputs,
+        a.output,
+        a.code_only,
+        runs or None,
+        dict(item.split("=", 1) for item in a.asset),
+        dict(item.split("=", 1) for item in a.anchor),
+    )
