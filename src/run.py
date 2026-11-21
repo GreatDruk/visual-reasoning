@@ -153,6 +153,9 @@ def execute(
                         head={k: v.cpu() for k, v in head.state_dict().items()},
                     ),
                 )
+            sink.npz(
+                "objects.npz", names=val.names, features=bank[0], positions=bank[1], valid=bank[2]
+            )
             report["training"] = training
             report["cpu_image_read_seconds"] = dict(
                 train=train.image_read_seconds, val=val.image_read_seconds
