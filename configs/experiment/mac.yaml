@@ -1,7 +1,0 @@
-# @package _global_
-defaults:
-  - override /model/image_encoder: resnet101
-  - override /model/text_encoder: gru
-  - override /model/fusion: mac
-  - override /loss: bce_pair
-  - override /aug: default

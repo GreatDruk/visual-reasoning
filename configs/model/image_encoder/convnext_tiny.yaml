@@ -1,7 +1,0 @@
-_target_: src.models.image_encoders.TorchvisionEncoder
-arch: convnext_tiny
-weights: IMAGENET1K_V1
-out_layer: features.5           # stage 3, 384 канала, stride 16
-spatial: true
-freeze: true
-unfreeze_last_n_blocks: 0

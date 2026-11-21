@@ -1,8 +1,0 @@
-# Аугментации: только реально исполняемые преобразования.
-# vflip / rotation / hue jitter / crop запрещены или рискованны по правилам: не добавлять.
-# logical_negatives не генерируем: смена left/right может не менять истинность
-# existential-утверждения при нескольких подходящих объектах.
-image:
-  hflip_swap_lr: 0.5            # flip + замена left<->right в подписи (иначе метка неверна)
-text:
-  reorder_clauses_p: 0.3        # перефраз с той же меткой (hard positives)

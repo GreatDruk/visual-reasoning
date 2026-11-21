@@ -1,9 +1,0 @@
-# @package _global_
-# Ablation: categorical readout without the ordinal distance term.
-defaults:
-  - pair_choice_count_siglip
-
-name_exp: debug_pair_count_classification_siglip
-model:
-  fusion:
-    ordinal_weight: 0.0

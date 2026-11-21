@@ -1,5 +1,0 @@
-# Без аугментаций: только реально исполняемые поля (см. configs/aug/default.yaml).
-image:
-  hflip_swap_lr: 0.0
-text:
-  reorder_clauses_p: 0.0

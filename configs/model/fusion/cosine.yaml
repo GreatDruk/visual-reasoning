@@ -1,7 +1,0 @@
-# Бейзлайн из описания соревнования: scale * cos(i, t) + bias -> sigmoid.
-# Работает с пулинговыми векторами; spatial-карта усредняется.
-_target_: src.models.fusion.CosineHead
-proj_dim: 256
-init_scale: 10.0
-init_bias: 0.0
-requires_spatial: false

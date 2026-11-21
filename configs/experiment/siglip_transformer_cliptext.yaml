@@ -1,5 +1,0 @@
-# @package _global_
-# SigLIP2 patch tokens + frozen pretrained SigLIP2 text tokens + TransformerHead.
-defaults:
-  - siglip_transformer
-  - override /model/text_encoder: clip_text

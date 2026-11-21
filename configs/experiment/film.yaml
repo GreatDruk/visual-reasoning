@@ -1,8 +1,0 @@
-# @package _global_
-# Пространственный кандидат: ResNet-50 + FiLM-голова; loss/aug подставляются этапами E-G матрицы.
-defaults:
-  - override /model/image_encoder: resnet50
-  - override /model/text_encoder: gru
-  - override /model/fusion: film
-  - override /loss: bce
-  - override /aug: none

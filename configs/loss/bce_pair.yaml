@@ -1,5 +1,0 @@
-# L = BCE + lambda * log(1 + exp(-(s+ - s-))) по парам pair_id.
-# Сэмплер должен класть обоих близнецов в один батч (train.pair_sampler: true).
-_target_: src.losses.TruthLoss
-pair_weight: 0.5
-label_smoothing: 0.0

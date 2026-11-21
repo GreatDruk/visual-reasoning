@@ -1,9 +1,0 @@
-# @package _global_
-# Ablation: share density between count tasks, without position/spatial grounding.
-defaults:
-  - pair_geometric_stage2
-
-name_exp: debug_pair_geometric_no_grounding
-model:
-  fusion:
-    grounding_weight: 0.0

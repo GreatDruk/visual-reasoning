@@ -1,8 +1,0 @@
-# Свой словарь по train(+val) подписям, обучается с нуля. Как генератор в FiLM.
-_target_: src.models.text_encoders.GRUEncoder
-embed_dim: 200
-hidden_dim: 256
-num_layers: 1
-bidirectional: true
-dropout: 0.1
-lowercase: true

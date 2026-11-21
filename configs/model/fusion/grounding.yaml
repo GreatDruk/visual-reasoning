@@ -1,9 +1,0 @@
-# Текстовые запросы, напрямую выбирающие ячейки карты; z*q в readout с первого шага (без плато TransformerHead).
-_target_: src.models.fusion.GroundingHead
-dim: 256
-queries: 4
-hidden: 128
-dropout: 0.1
-max_cells: [8, 12]
-input_pool: 2                   # 16x24 SigLIP-сетка -> 8x12; null для полного разрешения (max_cells: [16, 24])
-requires_spatial: true
