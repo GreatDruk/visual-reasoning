@@ -130,6 +130,8 @@ TTA для `r50_img` (`kaggle_suite_detectors.py`, `detector_eval`): исход�
 
 Где неуверенность на test (пары с |Δлогит| < 2 у count_swap; в скобках — пары, где знак расходится с локальной `occ`): comparison 54 (26), counting 37 (41), spatial_counting 23 (8), остальные категории ≤ 12 (≤ 5). На val те же доли в 2–3 раза ниже: counting 12 (3), comparison 9 (7), spatial_counting 8 (3). Значит, остаток ошибок на test почти весь в счётных категориях. Рычаг — dense counter и union (веса у тиммейта), а не r50/sigft.
 
+Union (control-голова поверх слитой таблицы r50+thaw), своя голова только на train, seed 421, 12 эпох; val по видам: фаза 00 — 0.999521 / 28 ошибочных пар (counting 11, comparison 8, spatial_counting 3); среднее 4 фаз 00/20/02/22 — 0.999586 / 21 (counting 5, comparison 6, spatial_counting 4); 3 фазы 00/02/22 — 0.999618. Отражение для union вредит (0.99674). Итог `union_tv` (.75·occ+.25·union): 0.999787 → 0.999789. Прокси на лидере val нейтрален (w ≤ 0.1 — 2 пары). В `swap_upstream_refit` union теперь усредняется по 4 фазам (`UNION_PHASES`).
+
 Очередь идей:
 1. Те же виды TTA для r50 внутри union-ветки (вход для всех категорий). Нужны `initial/union_{421,853}.pt` из `clevr_count_tv.zip` (их нет ни в переданных архивах, ни в Kaggle-датасете).
 2. ~~Отражение для dense counter~~ — проверено на своём счётчике, вредит.

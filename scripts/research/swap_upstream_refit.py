@@ -23,10 +23,14 @@ def setup_detectors():
     shutil.copyfile(INPUT/"scene_silhouette.pt",WEIGHTS/"scene_silhouette.pt")
 
 
+UNION_PHASES=("00","20","02","22")
+
+
 def predict_union_part(shard,device):
     verifier.PRIORS=WEIGHTS
     verifier.CACHE.mkdir(exist_ok=True)
-    phase_refit.extract("test",shard,device,single=True)
+    # All four stride-4 grid phases; combine() averages the union scores over them.
+    phase_refit.extract("test",shard,device,single=False)
 
 
 def combine(device):
@@ -41,20 +45,22 @@ def combine(device):
     # Val, train-only heads (r50 with TTA_WEIGHT .25): .5/.5/.25 gives AUC 0.999733 and 14 wrong
     # pairs; .65/.35/.35 gives 0.999783 and 11. The whole .6-.7 x .35-.5 region is >= 0.99976.
     occ=.65*read("test","r50_img",frame)+.35*read("test","sigft",frame)+.35*delta
-    phase_refit.assemble("test","00")
     table=verifier.CACHE/"tables"
-    shutil.copyfile(table/"test_00.npz",table/"test.npz")
     verifier.OUT=Path("union")
     verifier.OUT.mkdir(exist_ok=True)
     for seed in (421,853):
-        source=INPUT/f"union_{seed}.pt"
-        shutil.copyfile(source,verifier.OUT/f"control_{seed}.pt")
-        verifier.infer("test","control",seed,device)
+        shutil.copyfile(INPUT/f"union_{seed}.pt",verifier.OUT/f"control_{seed}.pt")
+    # Val, train-only union head: one phase AUC 0.999521 (counting 11 wrong pairs),
+    # mean of the four phases 0.999586 (counting 5). Mirrored views hurt (0.9967), so none.
     values=[]
-    for seed in (421,853):
-        with np.load(verifier.OUT/f"control_{seed}_test.npz") as saved:
-            np.testing.assert_array_equal(saved["ids"],frame.id)
-            values.append(saved["score"])
+    for phase in UNION_PHASES:
+        phase_refit.assemble("test",phase)
+        shutil.copyfile(table/f"test_{phase}.npz",table/"test.npz")
+        for seed in (421,853):
+            verifier.infer("test","control",seed,device)
+            with np.load(verifier.OUT/f"control_{seed}_test.npz") as saved:
+                np.testing.assert_array_equal(saved["ids"],frame.id)
+                values.append(saved["score"])
     union=np.mean(values,axis=0)
     easy=(~frame.category.isin(["counting","spatial_counting","comparison"])) & (occ*union>0)
     result=(.75*occ+.25*union)*np.where(easy,1.5,1.)
