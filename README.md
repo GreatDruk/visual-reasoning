@@ -3,7 +3,7 @@
 Исследуем три фиксированные основы и следующий слой восстановления объектов, сохраняя parser и executor. Обоснования, матрица и результаты — в [KaggleTemplate.md](KaggleTemplate.md).
 
 ```text
-configs/                  019_base.yaml … 050_union.yaml
+configs/                  019_base.yaml … 055_count.yaml
 src/                      восприятие, программы, обучение, оценка и упаковка
 tests/                    проверки готового кода
 notebooks/base.ipynb       единый Kaggle-ноутбук
@@ -33,7 +33,7 @@ uv run python -m src.run --config configs/019_base.yaml --data data
 uv run python -m src.package --inputs inputs --output artefacts/kaggle/base.zip
 ```
 
-Загрузить `base.zip` в private dataset, подключить данные соревнования, открыть `notebooks/base.ipynb`, выбрать T4 ×2, отключить интернет. Для первого исследования основы использовать `SELECTED = ["019_base", "020_resnet", "029_siglip"]`. Текущий notebook выбирает union 045–050 и требует также новый runtime с foundation checkpoint. `SEEDS=None` использует seed каждого конфига; `SEEDS=[853]` повторяет выбранные варианты.
+Загрузить `base.zip` в private dataset, подключить данные соревнования, открыть `notebooks/base.ipynb`, выбрать T4 ×2, отключить интернет. Для первого исследования основы использовать `SELECTED = ["019_base", "020_resnet", "029_siglip"]`. Текущий notebook выбирает counters 051–055 и требует актуальный runtime с foundation checkpoint, donors и L2 anchors. `SEEDS=None` использует seed каждого конфига; `SEEDS=[853]` повторяет выбранные варианты.
 
 Если Kaggle распаковал ZIP при загрузке, ноутбук находит корень проекта по `package.json` и каталогам `src`, `configs`, `inputs` и читает их непосредственно из датасета. Копировать веса в рабочий каталог не нужно. Сохранённый файл `base.zip` также поддерживается; контрольные суммы проверяются в обоих случаях.
 
@@ -64,3 +64,9 @@ uv run python -m src.package --code-only --output artefacts/kaggle/runtime.zip -
 Новые fit-запуски сохраняют `objects.npz` с именами val-сцен, признаками объектной таблицы, позициями и valid-маской. Для SigLIP признаки включают PCA-колонки. Это диагностический выход для разбора пропусков и дублей; обучение его не читает. Текущая матрица, измеренные результаты и следующая группа запусков находятся в `KaggleTemplate.md`.
 
 Пакет требует подготовленного `inputs/manifest.json`. Входы не восстанавливаются молча из `artefacts` и не скачиваются автоматически. Исторические teacher targets и контрольные checkpoint — явно объявленные team-зависимости.
+
+Текущий этап — dense counts 051–055. Обновлённый `runtime.zip` содержит те же основы, небольшой train-donor asset и три фиксированных L2 validation anchor. Source CNN каждого counter обучается 18 эпох; L2-ветки для этой исследовательской оценки не переобучаются. Доноры проверяются против полного train.csv, не включают val; foreground cache и JPEG decode общие. Наблюдаемые foreground-пиксели защищены при вставке, однако исходные маски и классы являются псевдометками.
+
+Notebook по умолчанию запускает 051–055 на seed 421. Очередь сначала готовит общие данные, затем распределяет счётчики между GPU. Размер батча профилируется по полному loss/backward (включая paired images и joint density); effective batch остаётся 96, BN statistics заморожены. В `counts.npz` сохраняются histogram, mass map и query counts; в отчёте — абсолютная count MAE, доля ошибок менее половины объекта, acceptance rate вставок и сравнение трёх L2 anchors. `branch_metrics` относится только к counting/comparison; полный AUC находится в `metrics`/`blends`. Пространственные категории этот counter не изменяет.
+
+Дополнительные входы упаковщика задаются явными `--asset ROLE=PATH` и `--anchor ROLE=NPZ`. Исследовательские anchors — сохранённые прогнозы ранее зафиксированных моделей, не обучающие метки и не test inference pipeline. В итоговом fresh-training запуске весь L2 и counter должны воспроизводиться из обучения. `result.zip` каждого counter содержит отчёты, а веса отдельно лежат в `artefacts/weights` — они не дублируются внутри вложенного ZIP.
