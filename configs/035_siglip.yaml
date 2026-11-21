@@ -1,0 +1,5 @@
+parent: 029_siglip
+hypothesis: Use historical R50 boxes and table instead of thaw; test whether the third
+  detector can be removed.
+siglip:
+  proposals: resnet

@@ -1,0 +1,5 @@
+parent: 029_siglip
+hypothesis: Concatenate pooled block-18 and final features before the same 128-dimensional
+  train-fitted PCA.
+siglip:
+  intermediate: 18

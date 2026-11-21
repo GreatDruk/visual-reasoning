@@ -1,0 +1,5 @@
+parent: 029_siglip
+hypothesis: Expand each crop by 1.35 around its center to retain boundary and neighboring
+  context; measure attribute contamination.
+siglip:
+  crop: context

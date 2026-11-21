@@ -1,0 +1,5 @@
+parent: 029_siglip
+hypothesis: Preserve object aspect ratio by letterboxing within its box instead of
+  stretching to a square.
+siglip:
+  crop: letterbox

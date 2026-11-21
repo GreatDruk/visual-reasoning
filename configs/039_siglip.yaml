@@ -1,0 +1,5 @@
+parent: 032_siglip
+hypothesis: Attribute-preserving crop reflections and mild brightness perturbations
+  during visual adaptation.
+siglip:
+  augment: true
