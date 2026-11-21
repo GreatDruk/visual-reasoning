@@ -6,7 +6,7 @@ import numpy as np
 from scipy.special import logit
 from scipy.stats import qmc
 
-from .models.slot_program import AND, EXACT, EXIST, FEWER, MORE, NONE, WORD_INDEX
+from .programs import AND, EXACT, EXIST, FEWER, MORE, NONE, WORD_INDEX
 
 
 def _word_mask(words):
@@ -72,9 +72,9 @@ def sample_scene_scores(programs, pairs, objectness, attributes, xy, offsets, se
     codes = np.zeros_like(present, dtype=np.int32)
     for j, (indices, probs) in enumerate(attributes, start=1):
         picked = (u[..., j, None] > probs.cumsum(-1)).sum(-1).clip(max=len(indices) - 1)
-        codes |= (1 << indices[picked])
+        codes |= 1 << indices[picked]
     # Shared small coordinate noise preserves ordering consistency between captions.
-    noise = logit(u[..., -3:-1]) * .026
+    noise = logit(u[..., -3:-1]) * 0.026
     logical = _execute(programs, codes, present, xy[None] + noise, objectness, offsets, u[..., -1])
     a, b = pairs.T
     linked = logical[:, a] ^ logical[:, b]
@@ -82,7 +82,7 @@ def sample_scene_scores(programs, pairs, objectness, attributes, xy, offsets, se
     weights = np.exp(1.3 * (count - len(pairs)))
     weights = weights[:, None] * linked
     mass = weights.sum(axis=0)
-    p_left = ((logical[:, a] * weights).sum(axis=0) + .75) / (mass + 1.5)
+    p_left = ((logical[:, a] * weights).sum(axis=0) + 0.75) / (mass + 1.5)
     logits = np.empty(len(programs), dtype=np.float64)
     logits[a] = logit(p_left)
     logits[b] = -logits[a]
