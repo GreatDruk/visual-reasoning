@@ -5,6 +5,7 @@ import json
 import sys
 import zipfile
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -116,3 +117,13 @@ def test_runtime_overlay_updates_code_without_copying_model_inputs(bootstrap):
     assert (project / "src/__init__.py").read_bytes() == source
     assert execute.namespace["inputs"] == original / "inputs"
     assert not (project / "inputs").exists()
+
+
+def test_notebook_rejects_the_old_runtime_before_starting_any_jobs(monkeypatch):
+    notebook = json.loads(Path("notebooks/base.ipynb").read_text(encoding="utf-8"))
+    source = "".join(notebook["cells"][-1]["source"])
+    old = ModuleType("src")
+    old.runtime = SimpleNamespace(gradient_step=lambda: None)
+    monkeypatch.setitem(sys.modules, "src", old)
+    with pytest.raises(AssertionError, match="Update the runtime dataset"):
+        exec(compile(source, "base.ipynb/run", "exec"), {})
