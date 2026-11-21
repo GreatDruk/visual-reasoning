@@ -1,0 +1,8 @@
+parent: 051_count
+hypothesis: Add the historical counterfactual count-difference objective to 051.
+  A train-only donor behind existing foreground contributes one known class only
+  when sufficiently visible; rejected insertions have exact zero change.
+count:
+  paired: true
+sources:
+- https://arxiv.org/abs/2012.07177

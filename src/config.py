@@ -20,6 +20,9 @@ def load_config(path, stack=()):
         raise ValueError("Configuration must be a mapping")
     parent = item.pop("parent", None)
     extension = item.pop("union", None)
+    count_extension = item.pop("count", None)
+    if count_extension is not None and not isinstance(count_extension, dict):
+        raise ValueError("Count settings must be a mapping")
     if extension is not None and not isinstance(extension, dict):
         raise ValueError("Union settings must be a mapping")
     if parent:
@@ -33,6 +36,8 @@ def load_config(path, stack=()):
     result["name"] = path.stem
     if extension is not None:
         result["union"] = {**result.get("union", {}), **extension}
+    if count_extension is not None:
+        result["count"] = {**result.get("count", {}), **count_extension}
     required = {
         "name",
         "family",
@@ -43,12 +48,14 @@ def load_config(path, stack=()):
         "siglip",
         "evaluation",
     }
-    if set(result) - {"union"} != required:
+    if set(result) - {"union", "count"} != required:
         raise ValueError(f"Unexpected or missing configuration fields: {set(result) ^ required}")
-    if result["family"] not in ("base", "resnet", "siglip", "union"):
+    if result["family"] not in ("base", "resnet", "siglip", "union", "count"):
         raise ValueError("Unsupported experiment family")
     if "union" in result and result["family"] != "union":
         raise ValueError("Union settings require the union experiment family")
+    if "count" in result and result["family"] != "count":
+        raise ValueError("Count settings require the count experiment family")
     if result["model"]["neck"] not in ("sum", "bifpn", "multi"):
         raise ValueError("Unsupported neck")
     if result["model"]["backbone"] not in ("resnet", "convnext"):
@@ -102,6 +109,27 @@ def load_config(path, stack=()):
             raise ValueError("Head switches must be boolean")
         if u["extract_batch"] < 1 or not isinstance(u["source"], str):
             raise ValueError("Invalid extraction source or batch")
+    if result["family"] == "count":
+        c = result.get("count", {})
+        expected = {
+            "source",
+            "density",
+            "paired",
+            "difficulty",
+            "attempts",
+            "absolute_weight",
+            "pair_weight",
+            "weight",
+            "primary",
+        }
+        if set(c) != expected:
+            raise ValueError(f"Unexpected or missing count fields: {set(c) ^ expected}")
+        if c["density"] not in ("factorized", "joint") or c["difficulty"] not in ("mixed", "tiny"):
+            raise ValueError("Unsupported density or donor visibility policy")
+        if not isinstance(c["paired"], bool) or not 1 <= c["attempts"] <= 4:
+            raise ValueError("Invalid counterfactual sampling policy")
+        if not 0 < c["weight"] < 1 or min(c["absolute_weight"], c["pair_weight"]) < 0:
+            raise ValueError("Invalid count loss or blend weight")
     return result
 
 

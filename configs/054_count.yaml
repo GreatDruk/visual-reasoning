@@ -1,0 +1,5 @@
+parent: 052_count
+hypothesis: Replace only the source with task-trained ConvNeXt 044. Same density,
+  resolution, losses and update budget; distinct from the old ImageNet TileCounter.
+count:
+  source: convnext

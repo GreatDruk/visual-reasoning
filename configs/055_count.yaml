@@ -1,0 +1,7 @@
+parent: 052_count
+hypothesis: Train the counterfactual objective on small visible fragments instead
+  of the mixed 12-85 percent distribution. Up to three placements reduce rejection;
+  acceptance rate and visible pixel count are recorded, never assume a +1 label.
+count:
+  difficulty: tiny
+  attempts: 3

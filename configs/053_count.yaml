@@ -1,0 +1,5 @@
+parent: 052_count
+hypothesis: Relax the factorized-attribute assumption using a zero-initialized
+  joint 96-class correction from the same pyramid, without another CNN pass.
+count:
+  density: joint

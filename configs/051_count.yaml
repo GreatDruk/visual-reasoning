@@ -1,0 +1,26 @@
+parent: 019_base
+family: count
+hypothesis: Dense mass integration on the historical task-trained R50. Caption
+  ranking plus absolute true-count supervision, without synthetic insertion.
+train:
+  seed: 421
+  epochs: 18
+  stages: [0, 0, 18]
+  batch: 96
+  effective_batch: 96
+  rate: 0.00006
+  head_rate: 0.0006
+evaluation:
+  bootstrap: 0
+count:
+  source: historical
+  density: factorized
+  paired: false
+  difficulty: mixed
+  attempts: 1
+  absolute_weight: 0.6
+  pair_weight: 0.28
+  weight: 0.25
+  primary: compact
+sources:
+- https://arxiv.org/abs/1802.05766
