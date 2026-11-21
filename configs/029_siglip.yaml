@@ -1,0 +1,6 @@
+parent: 019_base
+family: siglip
+hypothesis: Retrain the historical frozen trunk, learned 8x8 pooling, train-only PCA
+  and scene head.
+train:
+  seed: 721

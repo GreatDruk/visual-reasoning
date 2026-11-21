@@ -1,0 +1,4 @@
+parent: 019_base
+family: resnet
+hypothesis: Retrain the original four-level sum pyramid with joint caption and pseudo
+  detection loss.

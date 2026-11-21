@@ -1,0 +1,52 @@
+family: base
+hypothesis: Replay the historical plain R50 plus SigLIP foundation; no later corrections.
+sources: []
+model:
+  backbone: resnet
+  neck: sum
+  width: 64
+  separate: false
+  topk: 20
+train:
+  seed: 812
+  epochs: 21
+  stages:
+  - 0
+  - 0
+  - 21
+  batch: 128
+  calibrate: true
+  effective_batch: 128
+  rate: 0.001
+  head_rate: 0.0015
+  detection_weight: 0.65
+  soft_background: false
+  joint_flip: false
+  photometric: 0.0
+  count_weight: 0.0
+  max_minutes: 45
+siglip:
+  mode: frozen
+  proposals: thaw
+  crop: stretch
+  context: 1.35
+  pool_grid: 8
+  pool_epochs: 4
+  pool_batch: 384
+  extract_batch: 64
+  head_epochs: 10
+  head_rate: 0.002
+  head_min_rate: 0.0003
+  tail_blocks: 2
+  adapt_steps: 0
+  adapt_batch: 16
+  scene_batch: 4
+  tail_rate: 1.0e-05
+  pool_rate: 0.00012
+  objective: attributes
+  intermediate: 0
+  augment: false
+evaluation:
+  blend: 0.5
+  draws: 1024
+  bootstrap: 1000
