@@ -1,0 +1,9 @@
+parent: 041_siglip
+hypothesis: After the same pooling and head warm-up, unfreeze the final two blocks
+  for 400 attribute-supervised steps. Keep proposals, grid, PCA and caption-gradient
+  routing identical to 041 to isolate visual-tail adaptation.
+siglip:
+  mode: tail
+sources:
+- https://arxiv.org/abs/2202.10054
+- https://arxiv.org/abs/2502.14786

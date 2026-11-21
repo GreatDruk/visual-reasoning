@@ -1,0 +1,9 @@
+parent: 023_resnet
+hypothesis: Test three detection scales with the useful soft-background supervision
+  from 023. Keep backbone, objective weights and budget fixed; compare against 023
+  rather than changing architecture and background supervision together.
+model:
+  neck: multi
+sources:
+- https://arxiv.org/abs/1612.03144
+- https://arxiv.org/abs/1904.07850

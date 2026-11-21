@@ -25,12 +25,20 @@ def test_token_cache_is_removed_after_a_failed_step(tmp_path):
     assert not path.exists()
 
 
-@pytest.mark.parametrize("config", [f"{i:03d}_siglip" for i in range(29, 40)])
+@pytest.mark.parametrize(
+    "config",
+    [
+        p.stem
+        for p in sorted(Path("configs").glob("*.yaml"))
+        if load_config(p)["family"] == "siglip"
+    ],
+)
 def test_crop_training_runs_pooling_projection_head_and_adaptation(tmp_path, monkeypatch, config):
     from transformers import SiglipVisionConfig, SiglipVisionModel
 
     from src import crops
 
+    torch.manual_seed(42)
     rng = np.random.default_rng(42)
     for split in ("train", "val"):
         (tmp_path / split).mkdir()
@@ -90,6 +98,8 @@ def test_crop_training_runs_pooling_projection_head_and_adaptation(tmp_path, mon
     if config == "038_siglip":
         cfg["siglip"]["intermediate"] = 1
 
+    initial_backbone = {}
+
     def tiny(folder, settings):
         model = SiglipVisionModel(
             SiglipVisionConfig(
@@ -101,6 +111,7 @@ def test_crop_training_runs_pooling_projection_head_and_adaptation(tmp_path, mon
                 patch_size=16,
             )
         )
+        initial_backbone.update({k: v.clone() for k, v in model.state_dict().items()})
         return Vision(None, settings, model=model)
 
     monkeypatch.setattr(crops, "Vision", tiny)
@@ -124,6 +135,19 @@ def test_crop_training_runs_pooling_projection_head_and_adaptation(tmp_path, mon
     assert not (tmp_path / "pool.npy").exists()
     assert bank[0].shape == (2, 1, 166)
     assert all(torch.is_tensor(x) for x in projection.state().values())
+    changed = {
+        k
+        for k, v in vision.backbone.state_dict().items()
+        if not torch.equal(v, initial_backbone[k])
+    }
+    if cfg["siglip"]["mode"] == "tail":
+        assert changed
+        assert all(
+            "encoder.layers.2." in k or "encoder.layers.3." in k or "post_layernorm" in k
+            for k in changed
+        )
+    else:
+        assert not changed
 
 
 @pytest.mark.parametrize(

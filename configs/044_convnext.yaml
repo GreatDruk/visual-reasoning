@@ -1,0 +1,10 @@
+parent: 028_convnext
+hypothesis: Transfer the useful soft-background supervision to ConvNeXt. Compare
+  against 028 and 023 at the same seed to test the interaction of the two positive
+  changes while keeping the detector construction and optimization budget fixed.
+train:
+  seed: 853
+  soft_background: true
+sources:
+- https://arxiv.org/abs/2106.09018
+- https://arxiv.org/abs/2201.03545

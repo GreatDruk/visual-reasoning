@@ -1,0 +1,6 @@
+parent: 029_siglip
+hypothesis: Matched adaptation-budget control on the historical 8x8 tokens. Keep the
+  transformer frozen while pooling and the scene head receive 400 extra scene steps.
+siglip:
+  pool_grid: 8
+  adapt_steps: 400
