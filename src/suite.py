@@ -39,7 +39,13 @@ def run_suite(
             jobs.append((path, seed))
     if not jobs:
         raise ValueError("Select at least one configuration")
-    recovery = [(path, seed) for path, seed in jobs if load_config(path).get("family") == "union"]
+    recovery = [
+        (path, seed) for path, seed in jobs if load_config(path).get("family") in ("union", "count")
+    ]
+
+    def preparation_key(cfg):
+        return cfg["union"]["source"] if cfg.get("family") == "union" else "count"
+
     if recovery:
         if foundations is None:
             raise ValueError("Attach the immutable foundation bundle for union experiments")
@@ -52,7 +58,8 @@ def run_suite(
         results = []
         for config, seed in queue:
             log = work / f"{'prepare_' if prepare else ''}{config.stem}_{seed}.log"
-            recovery_job = load_config(config).get("family") == "union"
+            family = load_config(config).get("family")
+            recovery_job = family in ("union", "count")
             env = dict(
                 os.environ,
                 CUDA_VISIBLE_DEVICES=str(gpu),
@@ -70,7 +77,9 @@ def run_suite(
                 sys.executable,
                 "-u",
                 "-m",
-                "src.recovery" if recovery_job else "src.run",
+                "src.count_run"
+                if family == "count"
+                else ("src.recovery" if recovery_job else "src.run"),
                 "--config",
                 str(config),
                 "--data",
@@ -134,7 +143,7 @@ def run_suite(
     if recovery:
         sources = {}
         for path, seed in recovery:
-            sources.setdefault(load_config(path)["union"]["source"], (path, seed))
+            sources.setdefault(preparation_key(load_config(path)), (path, seed))
         preparation = list(sources.values())
         with ThreadPoolExecutor(len(gpus)) as pool:
             prepared = list(
@@ -153,13 +162,16 @@ def run_suite(
             kept = []
             for path, seed in jobs:
                 cfg = load_config(path)
-                if cfg.get("family") == "union" and cfg["union"]["source"] in failed_sources:
+                if (
+                    cfg.get("family") in ("union", "count")
+                    and preparation_key(cfg) in failed_sources
+                ):
                     preparation_failures.append(
                         dict(
                             name=path.stem,
                             seed=seed,
                             status="failed",
-                            error=f"Source preparation failed: {cfg['union']['source']}; inspect prepare logs",
+                            error=f"Source preparation failed: {preparation_key(cfg)}; inspect prepare logs",
                         )
                     )
                 else:
@@ -182,7 +194,7 @@ def run_suite(
             dict(
                 wall_seconds=time.monotonic() - started,
                 preparation_seconds=preparation_seconds,
-                head_and_evaluation_seconds=time.monotonic() - started - preparation_seconds,
+                training_and_evaluation_seconds=time.monotonic() - started - preparation_seconds,
                 scope="research suite, frozen foundations; not final fresh train and test",
             ),
             indent=2,
