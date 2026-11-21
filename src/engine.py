@@ -141,7 +141,10 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda", init_scale=128.0)
     teacher.prepare_targets(
-        device, 3 if cfg["model"]["neck"] == "multi" else 1, cfg["train"]["soft_background"]
+        device,
+        3 if cfg["model"]["neck"] == "multi" else 1,
+        cfg["train"]["soft_background"],
+        weak_only=cfg["train"].get("soft_background_weak_only", False),
     )
     batch = cfg["train"]["batch"] if device.type == "cuda" else min(2, cfg["train"]["batch"])
     batch_report = []

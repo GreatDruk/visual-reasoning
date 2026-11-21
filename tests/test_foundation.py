@@ -9,7 +9,7 @@ from src.config import load_config
 from src.data import encode_programs, reflected
 from src.detectors import dense_table, tables
 from src.heads import TableHead, load_head
-from src.losses import detection_loss, map_count_loss
+from src.losses import dense_targets, detection_loss, map_count_loss
 from src.metrics import metrics
 from src.programs import parse_program
 from src.runtime import Sink, immutable_inputs
@@ -88,6 +88,31 @@ def test_multiscale_decoding_does_not_count_one_object_twice():
     x, xy, valid = tables(out, (160, 240))
     assert valid.sum() == 1
     assert x.shape == (1, 20, 38)
+
+
+def test_weak_only_background_preserves_all_foreground_targets():
+    parts = [
+        (
+            np.array([[0.1, 0.1, 0.2, 0.2], [0.6, 0.6, 0.1, 0.1]]),
+            np.array([0.5, 0.95]),
+            np.array([True, True]),
+            np.zeros((2, 4), dtype=np.int64),
+        )
+    ]
+    all_boxes = dense_targets(parts, (40, 60), 4, torch.device("cpu"))
+    weak = dense_targets(parts, (40, 60), 4, torch.device("cpu"), weak_only=True)
+    for old, new in zip(all_boxes[:3], weak[:3]):
+        torch.testing.assert_close(old, new, rtol=0, atol=0)
+    torch.testing.assert_close(weak[3][0, 4:12, 6:18], all_boxes[3][0, 4:12, 6:18])
+    assert all_boxes[3][0, 24:28, 36:42].sum() > 0
+    assert weak[3][0, 24:28, 36:42].sum() == 0
+    raw = torch.zeros(1, 20, 40, 60, requires_grad=True)
+    detection_loss([raw], soft=True, targets=[all_boxes]).backward()
+    old = raw.grad.clone()
+    raw.grad.zero_()
+    detection_loss([raw], soft=True, targets=[weak]).backward()
+    torch.testing.assert_close(raw.grad[0, 0, 6, 9], old[0, 0, 6, 9])
+    assert raw.grad[0, 0, 24, 36] > old[0, 0, 24, 36]
 
 
 def test_head_migration_rejects_unknown_parameters_and_preserves_predictions():

@@ -1,0 +1,9 @@
+parent: 023_resnet
+hypothesis: Reduce background penalties only inside uncertain teacher proposals. Keep
+  normal negative supervision around confident objects to test the duplicate-object
+  cost of relaxing every teacher box; retain the detector, losses and training budget.
+train:
+  soft_background_weak_only: true
+sources:
+- https://arxiv.org/abs/2106.09018
+- https://arxiv.org/abs/1904.07850

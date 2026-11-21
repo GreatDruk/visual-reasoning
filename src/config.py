@@ -62,6 +62,8 @@ def load_config(path, stack=()):
         raise ValueError("Stage lengths must sum to the training epochs")
     if result["siglip"]["pool_grid"] not in (8, 16):
         raise ValueError("Pool grid must be 8 or 16")
+    if result["train"].get("soft_background_weak_only") and not result["train"]["soft_background"]:
+        raise ValueError("Weak-only uncertainty requires soft background supervision")
     return result
 
 

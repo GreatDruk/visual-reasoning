@@ -118,7 +118,8 @@ def test_scene_cache_and_program_batches_preserve_values(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("levels", [1, 3])
-def test_prepared_targets_match_original_rasterization(levels):
+@pytest.mark.parametrize("weak_only", [False, True])
+def test_prepared_targets_match_original_rasterization(levels, weak_only):
     teacher = Teacher.__new__(Teacher)
     teacher.names = ["a", "b"]
     teacher._targets = None
@@ -134,7 +135,7 @@ def test_prepared_targets_match_original_rasterization(levels):
         p[..., 0] = 1 - 0.01 * (n - 1)
         teacher.fields[name] = p
     device = torch.device("cpu")
-    teacher.prepare_targets(device, levels, True)
+    teacher.prepare_targets(device, levels, True, weak_only=weak_only)
     idx = np.array([1, 0])
     flips = np.array([True, False])
     actual = teacher.targets(idx, flips)
@@ -146,6 +147,7 @@ def test_prepared_targets_match_original_rasterization(levels):
             device,
             level,
             levels > 1,
+            weak_only=weak_only,
         )
         for a, b in zip(targets, expected):
             torch.testing.assert_close(a, b, rtol=0, atol=0)

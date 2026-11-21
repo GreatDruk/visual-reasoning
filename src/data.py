@@ -254,7 +254,7 @@ class Teacher:
         self.names = scenes.names
         self._targets = None
 
-    def prepare_targets(self, device, levels=1, soft=False):
+    def prepare_targets(self, device, levels=1, soft=False, weak_only=False):
         from .losses import dense_targets
 
         self._targets = []
@@ -277,6 +277,7 @@ class Teacher:
                         torch.device("cpu"),
                         level,
                         levels > 1,
+                        weak_only=weak_only,
                     )
                     for dest, value in zip(bank, target):
                         if dest is not None:

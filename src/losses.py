@@ -35,7 +35,7 @@ def caption_loss(head, table, batch, simple=False):
     return loss
 
 
-def dense_targets(parts, shape, stride, device, level=0, multiscale=False):
+def dense_targets(parts, shape, stride, device, level=0, multiscale=False, weak_only=False):
     h, w = shape
     centers = np.zeros((len(parts), h, w), np.float32)
     regression = np.zeros((len(parts), 4, h, w), np.float32)
@@ -46,14 +46,15 @@ def dense_targets(parts, shape, stride, device, level=0, multiscale=False):
             if not ok:
                 continue
             x, y, bw, bh = np.rint(box * np.array([240, 160, 240, 160]))
-            if prob > 0.1:
+            confident = prob > 0.84
+            if prob > 0.1 and not (weak_only and confident):
                 x0, y0 = max(0, int(x / stride)), max(0, int(y / stride))
                 x1, y1 = (
                     min(w, int(np.ceil((x + bw) / stride))),
                     min(h, int(np.ceil((y + bh) / stride))),
                 )
                 uncertain[i, y0:y1, x0:x1] = np.maximum(uncertain[i, y0:y1, x0:x1], prob)
-            if prob <= 0.84:
+            if not confident:
                 continue
             if multiscale:
                 assigned = 0 if max(bw, bh) < 32 else 1 if max(bw, bh) < 56 else 2

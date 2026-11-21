@@ -1,5 +1,7 @@
 """Exercise complete training paths with local tiny weights and real image files."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -124,7 +126,14 @@ def test_crop_training_runs_pooling_projection_head_and_adaptation(tmp_path, mon
     assert all(torch.is_tensor(x) for x in projection.state().values())
 
 
-@pytest.mark.parametrize("name", [f"{i:03d}_resnet" for i in range(20, 28)] + ["028_convnext"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        p.stem
+        for p in sorted(Path("configs").glob("*.yaml"))
+        if load_config(p)["family"] == "resnet"
+    ],
+)
 def test_every_detector_trains_through_its_stages_with_half_outputs(tmp_path, monkeypatch, name):
     from src import engine
     from src.detectors import Detector
