@@ -1,0 +1,7 @@
+parent: 029_siglip
+hypothesis: Keep all 16x16 tokens at pooling; isolate the information lost by 8x8
+  averaging.
+siglip:
+  pool_grid: 16
+sources:
+- https://arxiv.org/abs/2502.14786

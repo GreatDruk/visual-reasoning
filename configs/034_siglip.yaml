@@ -1,0 +1,7 @@
+parent: 031_siglip
+hypothesis: Use zero-initialized residual bottleneck adapters in the last two blocks
+  instead of changing pretrained weights.
+siglip:
+  mode: adapter
+sources:
+- https://arxiv.org/abs/2205.13535

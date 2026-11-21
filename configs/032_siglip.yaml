@@ -1,0 +1,7 @@
+parent: 031_siglip
+hypothesis: After head warm-up unfreeze the final two transformer blocks; retain attribute-only
+  visual gradients.
+siglip:
+  mode: tail
+sources:
+- https://arxiv.org/abs/2202.10054

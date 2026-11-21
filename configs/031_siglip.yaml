@@ -1,0 +1,5 @@
+parent: 030_siglip
+hypothesis: 'Matched 400-step scene adaptation control: pooling learns attributes,
+  scene loss stops at the embedding.'
+siglip:
+  adapt_steps: 400
