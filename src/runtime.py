@@ -200,12 +200,14 @@ class Sink:
         np.savez_compressed(data, **arrays)
         self.write("results", name, data.getvalue())
 
-    def finish(self):
+    def finish(self, include_weights=True):
         # Archive scratch copies, never reopen anything under artefacts.
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
             for p in self.stage.rglob("*"):
-                if p.is_file():
+                if p.is_file() and (
+                    include_weights or p.relative_to(self.stage).parts[0] != "weights"
+                ):
                     z.write(p, p.relative_to(self.stage).as_posix())
         self.write("results", "result.zip", buffer.getvalue())
 
