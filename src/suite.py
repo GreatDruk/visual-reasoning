@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -21,7 +20,6 @@ def run_suite(
     work.mkdir(parents=True, exist_ok=True)
     if not verified_inputs:
         immutable_inputs(inputs)
-    stop = threading.Event()
     jobs = []
     for name in selected:
         path = project / "configs" / f"{name}.yaml"
@@ -35,8 +33,6 @@ def run_suite(
     def worker(gpu, queue):
         results = []
         for config, seed in queue:
-            if stop.is_set():
-                break
             log = work / f"{config.stem}_{seed}.log"
             env = dict(
                 os.environ,
@@ -95,10 +91,9 @@ def run_suite(
                 tail = "\n".join(
                     log.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
                 )
-                stop.set()
                 print(f"FAILED {config.stem}: full log saved to {saved_log}\n{tail}", flush=True)
                 results.append(dict(name=config.stem, seed=seed, status="failed", error=tail))
-                break
+                continue
             matches = sorted(
                 (work / config.stem / str(seed)).glob("*/receipt.json"),
                 key=lambda p: p.stat().st_mtime,
