@@ -19,6 +19,11 @@ import torch
 _MONITOR = ContextVar("foundation_monitor", default=None)
 
 
+def zero_loss(tensor):
+    """Keep a zero gradient path without overflowing an FP16 reduction."""
+    return tensor.sum(dtype=torch.float32) * 0.0
+
+
 class Progress:
     """Low-frequency stage telemetry, relayed by the notebook process."""
 

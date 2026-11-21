@@ -8,7 +8,7 @@ from PIL import Image
 
 from src.data import Scenes, Teacher, encode_programs, reflected
 from src.losses import dense_targets
-from src.runtime import gradient_step
+from src.runtime import gradient_step, zero_loss
 
 
 def test_gradient_step_clips_finite_gradients():
@@ -19,6 +19,17 @@ def test_gradient_step_clips_finite_gradients():
     done, norm = gradient_step(scaler, opt, [parameter], loss=torch.tensor(1.0))
     assert done and norm == 10
     torch.testing.assert_close(parameter.detach(), torch.tensor([-3.0, -4.0]))
+
+
+def test_zero_loss_cannot_overflow_at_the_kaggle_detector_batch():
+    raw = torch.zeros(128, 20, 40, 60, dtype=torch.float16)
+    raw[:, 0] = -2.19
+    raw.requires_grad_()
+    assert torch.isfinite(raw).all() and not torch.isfinite(raw.sum() * 0)
+    value = zero_loss(raw)
+    assert value.dtype == torch.float32 and value.item() == 0
+    value.backward()
+    assert torch.isfinite(raw.grad).all() and not raw.grad.any()
 
 
 def test_amp_overflow_skips_the_update_and_reduces_scale():

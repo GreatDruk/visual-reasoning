@@ -6,6 +6,7 @@ from torch.nn import functional as F
 
 from .heads import GROUPS
 from .programs import EXACT, WORD_INDEX
+from .runtime import zero_loss
 
 
 def caption_loss(head, table, batch, simple=False):
@@ -73,7 +74,7 @@ def dense_targets(parts, shape, stride, device, level=0, multiscale=False):
 
 
 def detection_loss(outputs, parts=None, soft=False, targets=None):
-    total = outputs[0].new_zeros(())
+    total = outputs[0].new_zeros((), dtype=torch.float32)
     for level, raw in enumerate(outputs):
         raw = raw.float()
         center, reg, attr, uncertain = (
@@ -95,14 +96,14 @@ def detection_loss(outputs, parts=None, soft=False, targets=None):
             F.binary_cross_entropy_with_logits(raw[:, 0], center, reduction="none") * weight
         ).sum() / count
         location = (
-            raw.sum() * 0
+            zero_loss(raw)
             if not present.any()
             else F.smooth_l1_loss(
                 raw[:, 1:5].permute(0, 2, 3, 1)[present],
                 reg.permute(0, 2, 3, 1)[present],
             )
         )
-        classes = raw.sum() * 0
+        classes = zero_loss(raw)
         for j, scores in enumerate(raw[:, 5:].split([len(g) for g in GROUPS], 1)):
             truth = attr[:, j]
             classes += F.cross_entropy(
@@ -117,7 +118,7 @@ def map_count_loss(raw, batch):
     prog = batch["programs"]
     use = (prog["ops"] == EXACT) & (prog["relations"] == 0) & batch["label"].eq(1)
     if not use.any():
-        return raw.sum() * 0
+        return zero_loss(raw)
     source = raw.float()[batch["scenes"][use]]
     heat = source[:, 0]
     peaks = heat == F.max_pool2d(heat[:, None], 3, 1, 1)[:, 0]

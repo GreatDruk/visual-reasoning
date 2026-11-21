@@ -8,6 +8,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .heads import N_ATTRS
+from .runtime import zero_loss
 
 
 def crop_images(images, boxes, size=256, mode="stretch", context=1.35):
@@ -131,7 +132,7 @@ class Vision(nn.Module):
 
 
 def attribute_loss(scores, labels):
-    result = scores.sum() * 0
+    result = zero_loss(scores)
     count = labels.ge(0).sum().clamp_min(1)
     for i, group in enumerate(scores.float().split((2, 8, 2, 3), -1)):
         result += F.cross_entropy(group, labels[:, i], ignore_index=-100, reduction="sum")

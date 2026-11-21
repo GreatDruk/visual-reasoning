@@ -10,7 +10,7 @@ from .heads import FEATURES, GROUPS, N_ATTRS, TableHead, load_head, probabilitie
 from .losses import caption_loss, detection_loss, map_count_loss
 from .native import CenterDetector
 from .posterior import sample_scene_scores
-from .runtime import Progress, amp, gradient_step, load_state, profile_batches
+from .runtime import Progress, amp, gradient_step, load_state, profile_batches, zero_loss
 
 
 def cpu_table(parts):
@@ -108,6 +108,21 @@ def photometric(images, rng, amount):
     return ((images - mean) * contrast + mean).mul(brightness).clamp(0, 1)
 
 
+def resnet_loss(cfg, head, outputs, det_outputs, packed, targets, stage, shape):
+    """Use the same FP32 objective in batch profiling and every curriculum stage."""
+    if stage == "objects":
+        loss = zero_loss(outputs[0])
+    else:
+        bank = tables(outputs, shape, cfg["model"]["topk"])
+        loss = caption_loss(head, bank, packed, simple=stage == "simple")
+    loss = loss + cfg["train"]["detection_weight"] * detection_loss(
+        det_outputs, soft=cfg["train"]["soft_background"], targets=targets
+    )
+    if cfg["train"]["count_weight"] and stage != "objects":
+        loss = loss + cfg["train"]["count_weight"] * map_count_loss(outputs[0], packed)
+    return loss
+
+
 def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
     weight_name = "resnet50" if cfg["model"]["backbone"] == "resnet" else "convnext"
     model = Detector(cfg["model"], inputs / "pretrained" / f"{weight_name}.pth").to(
@@ -130,6 +145,11 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
     )
     batch = cfg["train"]["batch"] if device.type == "cuda" else min(2, cfg["train"]["batch"])
     batch_report = []
+    active_stages = [
+        stage
+        for stage, epochs in zip(("objects", "simple", "all"), cfg["train"]["stages"])
+        if epochs
+    ]
     if device.type == "cuda" and cfg["train"].get("calibrate", True):
         saved_buffers = {name: t.clone() for name, t in model.named_buffers()}
         cpu_rng = torch.get_rng_state()
@@ -140,22 +160,22 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
         def probe(n):
             idx = np.arange(n)
             image = scenes.images(idx, device)
-            with amp(device):
-                out = model(image)
-            bank = tables(out, image.shape[-2:], cfg["model"]["topk"])
-            weak = caption_loss(head, bank, scenes.batch(idx, device))
-            with amp(device):
-                extra = model(image)
-            loss = weak + cfg["train"]["detection_weight"] * detection_loss(
-                extra,
-                soft=cfg["train"]["soft_background"],
-                targets=teacher.targets(idx, np.zeros(n, bool)),
-            )
-            try:
-                loss.backward()
-            finally:
-                model.zero_grad(set_to_none=True)
-                head.zero_grad(set_to_none=True)
+            packed = scenes.batch(idx, device)
+            targets = teacher.targets(idx, np.zeros(n, bool))
+            for stage in active_stages:
+                try:
+                    with amp(device):
+                        out = model(image)
+                        extra = model(image)
+                    loss = resnet_loss(
+                        cfg, head, out, extra, packed, targets, stage, image.shape[-2:]
+                    )
+                    if not torch.isfinite(loss):
+                        raise FloatingPointError(f"Non-finite {stage} loss in batch probe {n}")
+                    loss.backward()
+                finally:
+                    model.zero_grad(set_to_none=True)
+                    head.zero_grad(set_to_none=True)
 
         batch, batch_report = profile_batches(
             device, [n for n in (16, 32, 64, 128) if n <= batch], len(scenes.names), probe
@@ -210,10 +230,6 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
                 packed = scenes.batch(idx, device, flip)
                 with amp(device):
                     out = model(image)
-                bank = tables(out, image.shape[-2:], cfg["model"]["topk"])
-                loss = out[0].sum() * 0
-                if stage != "objects":
-                    loss = caption_loss(head, bank, packed, simple=stage == "simple")
                 # Control: a separate, mirrored pseudo-supervised pass; joint-flip arm
                 # uses the same transformed image for caption and object supervision.
                 det_flip = flip if cfg["train"]["joint_flip"] else rng.random(len(idx)) < 0.5
@@ -229,13 +245,16 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
                 # Keep two forwards in both arms, including BN update frequency.
                 with amp(device):
                     det_out = model(det_image)
-                loss += cfg["train"]["detection_weight"] * detection_loss(
+                loss = resnet_loss(
+                    cfg,
+                    head,
+                    out,
                     det_out,
-                    soft=cfg["train"]["soft_background"],
-                    targets=teacher.targets(idx, det_flip),
+                    packed,
+                    teacher.targets(idx, det_flip),
+                    stage,
+                    image.shape[-2:],
                 )
-                if cfg["train"]["count_weight"] and stage != "objects":
-                    loss += cfg["train"]["count_weight"] * map_count_loss(out[0], packed)
                 scaler.scale(loss * len(idx) / len(block)).backward()
                 block_loss += loss.detach() * len(idx) / len(block)
                 loss_sum += loss.detach() * len(idx)
@@ -281,6 +300,7 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
             scenes_per_second=sum(h["scenes"] for h in history) / (time.monotonic() - started),
             physical_batch=batch,
             batch_profile=batch_report,
+            profiled_stages=active_stages if batch_report else [],
             amp_skipped_updates=overflows,
         ),
     )
