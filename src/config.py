@@ -34,6 +34,18 @@ def load_config(path, stack=()):
     else:
         result = deepcopy(item)
     result["name"] = path.stem
+    if result.get("family") == "submission":
+        required = {"name", "family", "hypothesis", "sources", "blend"}
+        if set(result) != required:
+            raise ValueError("Unexpected submission configuration fields")
+        blend = result["blend"]
+        if set(blend) != {"base", "counter_weight", "tta_weight", "hidden_weight", "swap"}:
+            raise ValueError("Unexpected submission blend settings")
+        if blend["base"] not in ("compact", "quality") or not isinstance(blend["swap"], bool):
+            raise ValueError("Invalid submission base or swap")
+        if any(not 0 <= blend[k] <= 1 for k in ("counter_weight", "tta_weight", "hidden_weight")):
+            raise ValueError("Submission weights must be between zero and one")
+        return result
     if extension is not None:
         result["union"] = {**result.get("union", {}), **extension}
     if count_extension is not None:

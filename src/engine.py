@@ -65,8 +65,7 @@ def predict(scenes, head, bank, device, draws=1024):
     offsets = head.relation_offset.detach().cpu().numpy()
     progress = Progress(f"{scenes.split}/posterior", len(scenes.names), device)
     for i, rows in enumerate(scenes.rows):
-        pair = scenes.pairs[np.isin(scenes.pairs[:, 0], rows)]
-        local = np.searchsorted(rows, pair)
+        local = scenes._pairs_local[i]
         keep = valid[i]
         score[rows] = sample_scene_scores(
             [scenes.programs[j] for j in rows],

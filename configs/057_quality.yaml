@@ -1,0 +1,10 @@
+family: submission
+hypothesis: SigLIP and rescue complement the compact visual sources; add train-derived hidden uncertainty and guarded count orientation evidence.
+sources:
+- https://arxiv.org/abs/1802.05766
+blend:
+  base: quality
+  counter_weight: 0.25
+  tta_weight: 0.1
+  hidden_weight: 0.5
+  swap: true

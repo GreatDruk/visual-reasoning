@@ -1,0 +1,10 @@
+family: submission
+hypothesis: Compact C and plain U045 with repeated dense ConvNeXt counter and small R50 TTA residual.
+sources:
+- https://arxiv.org/abs/1802.05766
+blend:
+  base: compact
+  counter_weight: 0.25
+  tta_weight: 0.1
+  hidden_weight: 0.0
+  swap: false
