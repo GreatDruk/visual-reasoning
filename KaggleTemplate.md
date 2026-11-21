@@ -113,7 +113,7 @@ TTA для `r50_img` (`kaggle_suite_detectors.py`, `detector_eval`): исход�
 | demote_slots_t8 | понижение уверенности по несогласию со слотами | 0.99963 |
 | count_swap_r50tta_w01 | count_swap logit + 0.1·(TTA r50 − один вид), отражение | 0.99971 |
 | count_swap_r50tta4_w01 | то же, 4 вида | **0.99972** |
-| count_swap_r50tta8_w01 | то же, 8 видов (готов, не отправлен) | — |
+| count_swap_r50tta8_w01 | то же, 8 видов | 0.99972 |
 
 Сабмиты с поправкой w=0.1 — прокси. В полном пайплайне r50 входит в основу ансамбля с полным весом: нужно пересобрать `clevr_count_tv.zip` (`package_count_swap_refit.py`) и перезапустить `18_count_swap_refit`.
 
