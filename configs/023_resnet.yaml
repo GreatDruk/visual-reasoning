@@ -1,0 +1,7 @@
+parent: 020_resnet
+hypothesis: Reduce negative heatmap penalties inside plausible teacher boxes instead
+  of treating incomplete pseudo labels as certain background.
+train:
+  soft_background: true
+sources:
+- https://arxiv.org/abs/2106.09018

@@ -1,0 +1,7 @@
+parent: 020_resnet
+hypothesis: Replace equal top-down addition with learned bidirectional feature fusion
+  at the same channel width.
+model:
+  neck: bifpn
+sources:
+- https://arxiv.org/abs/1911.09070

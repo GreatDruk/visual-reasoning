@@ -1,0 +1,5 @@
+parent: 020_resnet
+hypothesis: Separate center, geometry and attribute readouts; test competition between
+  their gradients.
+model:
+  separate: true

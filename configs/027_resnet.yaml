@@ -1,0 +1,5 @@
+parent: 020_resnet
+hypothesis: Send true exact-count constraints to all local peaks before top-k selection
+  and hard inclusion thresholds.
+train:
+  count_weight: 0.2

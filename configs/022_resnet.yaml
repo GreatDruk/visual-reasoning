@@ -1,0 +1,6 @@
+parent: 020_resnet
+hypothesis: Feed meaning-consistent horizontal reflections and mild photometric views
+  through both caption and object losses.
+train:
+  joint_flip: true
+  photometric: 0.04

@@ -1,0 +1,8 @@
+parent: 020_resnet
+hypothesis: Predict at strides 4, 8 and 16 with explicit size assignment and cross-level
+  duplicate suppression.
+model:
+  neck: multi
+sources:
+- https://arxiv.org/abs/1612.03144
+- https://arxiv.org/abs/1904.07850

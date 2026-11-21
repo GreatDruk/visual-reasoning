@@ -1,0 +1,10 @@
+parent: 020_resnet
+hypothesis: Object warm-up 3 epochs, simple nonrelational statements 4, all statements
+  14; same total exposure.
+train:
+  stages:
+  - 3
+  - 4
+  - 14
+sources:
+- https://arxiv.org/abs/1904.12584

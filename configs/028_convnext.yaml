@@ -1,0 +1,7 @@
+parent: 020_resnet
+hypothesis: Replace only the classification backbone with ImageNet ConvNeXt Tiny;
+  retain the sum neck, decoder and losses.
+model:
+  backbone: convnext
+sources:
+- https://arxiv.org/abs/2201.03545
