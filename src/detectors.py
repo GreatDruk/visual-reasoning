@@ -127,7 +127,7 @@ class Detector(nn.Module):
         return [self.head(x) for x in (levels[:3] if self.neck == "multi" else levels[:1])]
 
 
-def dense_table(raw, height=160, width=240, stride=4, topk=20, latent=None):
+def dense_table(raw, height=160, width=240, stride=4, topk=20, latent=None, min_logit=-2.442347):
     heat = raw[:, 0]
     peak = heat == F.max_pool2d(heat[:, None], 3, 1, 1)[:, 0]
     k = min(topk, heat.shape[-1] * heat.shape[-2])
@@ -148,13 +148,13 @@ def dense_table(raw, height=160, width=240, stride=4, topk=20, latent=None):
             .transpose(1, 2)
         )
     x = torch.cat((fields[..., :1], *attrs, box, extra), -1)
-    valid = (fields[..., 0] >= -2.442347) & peak.flatten(1).gather(1, idx)
+    valid = (fields[..., 0] >= min_logit) & peak.flatten(1).gather(1, idx)
     return x, xy, valid
 
 
-def tables(outputs, shape, topk=20):
+def tables(outputs, shape, topk=20, min_logit=-2.442347):
     parts = [
-        dense_table(raw.float(), *shape, stride=4 * 2**i, topk=topk)
+        dense_table(raw.float(), *shape, stride=4 * 2**i, topk=topk, min_logit=min_logit)
         for i, raw in enumerate(outputs)
     ]
     if len(parts) == 1:
