@@ -38,7 +38,9 @@ def combine(device):
             return saved["score"]
     delta=postrun_visual_audit.rescue("test",128,device,weights=lambda n:load(WEIGHTS/f"{n}.pt"),
                                      scores_from=read,output_adjustment=True,data_path=DATA)
-    occ=.5*(read("test","r50_img",frame)+read("test","sigft",frame))+.25*delta
+    # Val, train-only heads (r50 with TTA_WEIGHT .25): .5/.5/.25 gives AUC 0.999733 and 14 wrong
+    # pairs; .65/.35/.35 gives 0.999783 and 11. The whole .6-.7 x .35-.5 region is >= 0.99976.
+    occ=.65*read("test","r50_img",frame)+.35*read("test","sigft",frame)+.35*delta
     phase_refit.assemble("test","00")
     table=verifier.CACHE/"tables"
     shutil.copyfile(table/"test_00.npz",table/"test.npz")
