@@ -1,0 +1,5 @@
+parent: 046_union
+hypothesis: Add geometry-aware interobject attention to exactly the 046 candidate
+  table. Isolate relations from adding proposals and from local image features.
+union:
+  relational: true

@@ -1,0 +1,30 @@
+parent: 019_base
+family: union
+hypothesis: Refit the historical geometry-only R50 plus thaw union on train captions.
+  All four inference phases are saved; no category rescaling or new SigLIP crops.
+train:
+  seed: 421
+  epochs: 12
+  stages: [0, 0, 12]
+  batch: 96
+  effective_batch: 96
+  rate: 0.0008
+evaluation:
+  bootstrap: 0  # Run scene bootstrap locally after downloading, not while GPUs wait.
+union:
+  source: historical
+  relational: true
+  roi: false
+  phase: zero
+  proposal_floor: 0.025
+  single_floor: 0.08
+  radius_factor: 0.52
+  radius_min: 6.0
+  radius_max: 13.0
+  extract_batch: 128
+  weight: 0.25
+  rescue_weight: 0.25
+  primary: historical
+sources:
+- https://arxiv.org/abs/1711.11575
+- https://proceedings.mlr.press/v97/lee19d.html

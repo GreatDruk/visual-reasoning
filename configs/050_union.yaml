@@ -1,0 +1,6 @@
+parent: 048_union
+hypothesis: Apply the phase-trained geometry-only verifier to R50 023 plus thaw,
+  preserving the fast foundation without adding a ConvNeXt dependency.
+union:
+  source: resnet
+  primary: fast

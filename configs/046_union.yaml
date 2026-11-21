@@ -1,0 +1,7 @@
+parent: 045_union
+hypothesis: Pointwise control on the new ConvNeXt plus thaw union. Same readout,
+  candidate set and weak-object correction range as 047; context is zeroed.
+union:
+  source: convnext
+  relational: false
+  primary: quality

@@ -1,0 +1,7 @@
+parent: 047_union
+hypothesis: Train on one fixed random grid phase per scene, assignment seed 7.
+  This reproduces the phase-training idea without changing its epoch semantics.
+union:
+  phase: scene
+sources:
+- https://arxiv.org/abs/1904.11486

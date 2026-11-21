@@ -19,6 +19,9 @@ def load_config(path, stack=()):
     if not isinstance(item, dict):
         raise ValueError("Configuration must be a mapping")
     parent = item.pop("parent", None)
+    extension = item.pop("union", None)
+    if extension is not None and not isinstance(extension, dict):
+        raise ValueError("Union settings must be a mapping")
     if parent:
         if not NAME.fullmatch(parent):
             raise ValueError("Parent must be a configuration name")
@@ -28,6 +31,8 @@ def load_config(path, stack=()):
     else:
         result = deepcopy(item)
     result["name"] = path.stem
+    if extension is not None:
+        result["union"] = {**result.get("union", {}), **extension}
     required = {
         "name",
         "family",
@@ -38,10 +43,12 @@ def load_config(path, stack=()):
         "siglip",
         "evaluation",
     }
-    if set(result) != required:
+    if set(result) - {"union"} != required:
         raise ValueError(f"Unexpected or missing configuration fields: {set(result) ^ required}")
-    if result["family"] not in ("base", "resnet", "siglip"):
+    if result["family"] not in ("base", "resnet", "siglip", "union"):
         raise ValueError("Unsupported experiment family")
+    if "union" in result and result["family"] != "union":
+        raise ValueError("Union settings require the union experiment family")
     if result["model"]["neck"] not in ("sum", "bifpn", "multi"):
         raise ValueError("Unsupported neck")
     if result["model"]["backbone"] not in ("resnet", "convnext"):
@@ -64,6 +71,37 @@ def load_config(path, stack=()):
         raise ValueError("Pool grid must be 8 or 16")
     if result["train"].get("soft_background_weak_only") and not result["train"]["soft_background"]:
         raise ValueError("Weak-only uncertainty requires soft background supervision")
+    if result["family"] == "union":
+        u = result.get("union", {})
+        fields = {
+            "source",
+            "relational",
+            "roi",
+            "phase",
+            "proposal_floor",
+            "single_floor",
+            "radius_factor",
+            "radius_min",
+            "radius_max",
+            "extract_batch",
+            "weight",
+            "rescue_weight",
+            "primary",
+        }
+        if set(u) != fields:
+            raise ValueError(f"Unexpected or missing union fields: {set(u) ^ fields}")
+        if u["phase"] not in ("zero", "scene", "epoch"):
+            raise ValueError("Unsupported training phase policy")
+        if not 0 < u["proposal_floor"] <= u["single_floor"] < 1:
+            raise ValueError("Invalid proposal probabilities")
+        if not 0 < u["radius_min"] <= u["radius_max"] or u["radius_factor"] <= 0:
+            raise ValueError("Invalid matching radius")
+        if not 0 < u["weight"] < 1 or not 0 <= u["rescue_weight"] <= 1:
+            raise ValueError("Invalid recovery blend weights")
+        if not isinstance(u["relational"], bool) or not isinstance(u["roi"], bool):
+            raise ValueError("Head switches must be boolean")
+        if u["extract_batch"] < 1 or not isinstance(u["source"], str):
+            raise ValueError("Invalid extraction source or batch")
     return result
 
 

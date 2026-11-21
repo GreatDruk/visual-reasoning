@@ -1,0 +1,8 @@
+parent: 048_union
+hypothesis: Add bilinearly sampled local features from the already computed
+  64-channel stride-four pyramid. No extra image pass, crop encoder or PCA.
+  Compare with 048 on identical cached proposals and phases.
+union:
+  roi: true
+sources:
+- https://arxiv.org/abs/1711.11575
