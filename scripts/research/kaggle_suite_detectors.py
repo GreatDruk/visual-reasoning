@@ -272,13 +272,17 @@ def detector_eval(split_name, name):
         for dx, dy, flip in TTA_VIEWS:
             seen = infer_table(model, ViewSplit(split, dx, dy, flip), None, f"{name}/{split_name}/{dx}{dy}{int(flip)}")
             views.append(joint(split, table_predictions(head, view_table(seen, dx, dy, flip), device), offset))
-        scores = np.mean(views, axis=0)
+        scores = scores + TTA_WEIGHT * (np.mean(views, axis=0) - scores)
     record(name, split, scores)
 
 
 # (dx, dy, mirrored) in pixels. A 2 px shift is half of the stride-4 detector grid.
 # Val, r50_img fit on train: 1 view AUC 0.998744, + flip 0.999220, all four 0.999529.
 TTA_VIEWS = ((0, 0, True), (2, 2, False), (2, 2, True))
+# Only part of the view average is kept. Inside the downstream occ branch
+# (.5*(r50+sigft)+.25*rescue) on val, the full average lowers AUC 0.999732 -> 0.999670,
+# while plain + 0.25*(average - plain) keeps 0.999733 with 14 wrong pairs instead of 16.
+TTA_WEIGHT = .25
 
 
 class ViewSplit:
