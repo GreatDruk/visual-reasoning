@@ -10,7 +10,7 @@ from .heads import FEATURES, GROUPS, N_ATTRS, TableHead, load_head, probabilitie
 from .losses import caption_loss, detection_loss, map_count_loss
 from .native import CenterDetector
 from .posterior import sample_scene_scores
-from .runtime import amp, load_state, profile_batches
+from .runtime import Progress, amp, gradient_step, load_state, profile_batches
 
 
 def cpu_table(parts):
@@ -37,6 +37,7 @@ def proposal_tables(scenes, inputs, settings, source, device, batch=128):
     parts = []
     if device.type == "cpu":
         batch = min(batch, 8)
+    progress = Progress(f"{scenes.split}/proposals", len(scenes.names), device)
     for start in range(0, len(scenes.names), batch):
         images = scenes.images(np.arange(start, min(start + batch, len(scenes.names))), device)
         with amp(device):
@@ -48,6 +49,7 @@ def proposal_tables(scenes, inputs, settings, source, device, batch=128):
                 descriptor = torch.einsum("bdhw,ds->bshw", latent, matrix)
                 outputs = dense_table(raw.float(), latent=descriptor.float())
         parts.append(cpu_table(outputs))
+        progress.update(start + len(images), batch=batch)
     return tuple(np.concatenate(v) for v in zip(*parts))
 
 
@@ -61,6 +63,7 @@ def predict(scenes, head, bank, device, draws=1024):
     p, xy, valid, *attrs = (np.concatenate(v) for v in zip(*parts))
     score = np.zeros(len(scenes.frame), np.float64)
     offsets = head.relation_offset.detach().cpu().numpy()
+    progress = Progress(f"{scenes.split}/posterior", len(scenes.names), device)
     for i, rows in enumerate(scenes.rows):
         pair = scenes.pairs[np.isin(scenes.pairs[:, 0], rows)]
         local = np.searchsorted(rows, pair)
@@ -75,6 +78,7 @@ def predict(scenes, head, bank, device, draws=1024):
             42,
             draws,
         )
+        progress.update(i + 1)
     return score
 
 
@@ -120,7 +124,10 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, cfg["train"]["epochs"], eta_min=cfg["train"]["rate"] * 0.08
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda", init_scale=128.0)
+    teacher.prepare_targets(
+        device, 3 if cfg["model"]["neck"] == "multi" else 1, cfg["train"]["soft_background"]
+    )
     batch = cfg["train"]["batch"] if device.type == "cuda" else min(2, cfg["train"]["batch"])
     batch_report = []
     if device.type == "cuda" and cfg["train"].get("calibrate", True):
@@ -140,7 +147,9 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
             with amp(device):
                 extra = model(image)
             loss = weak + cfg["train"]["detection_weight"] * detection_loss(
-                extra, teacher.batch(idx, np.zeros(n, bool)), cfg["train"]["soft_background"]
+                extra,
+                soft=cfg["train"]["soft_background"],
+                targets=teacher.targets(idx, np.zeros(n, bool)),
             )
             try:
                 loss.backward()
@@ -163,6 +172,8 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
         raise ValueError("Physical batch must divide the effective batch")
     history = []
     updates = 0
+    overflows = 0
+    consecutive = 0
     started = time.monotonic()
     for epoch in range(cfg["train"]["epochs"]):
         stage = (
@@ -174,12 +185,14 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
         )
         model.train()
         head.train()
-        loss_sum = 0.0
+        loss_sum = torch.zeros((), device=device)
         seen = 0
         order = rng.permutation(len(scenes.names))
+        progress = Progress(f"resnet/epoch{epoch + 1}/{stage}", len(order), device)
         opt.zero_grad(set_to_none=True)
         for begin in range(0, len(order), effective):
             block = order[begin : begin + effective]
+            block_loss = torch.zeros((), device=device)
             for start in range(0, len(block), batch):
                 idx = block[start : start + batch]
                 image = scenes.images(idx, device)
@@ -216,32 +229,46 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
                 # Keep two forwards in both arms, including BN update frequency.
                 with amp(device):
                     det_out = model(det_image)
-                target = teacher.batch(idx, det_flip)
                 loss += cfg["train"]["detection_weight"] * detection_loss(
-                    det_out, target, cfg["train"]["soft_background"]
+                    det_out,
+                    soft=cfg["train"]["soft_background"],
+                    targets=teacher.targets(idx, det_flip),
                 )
                 if cfg["train"]["count_weight"] and stage != "objects":
                     loss += cfg["train"]["count_weight"] * map_count_loss(out[0], packed)
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("Non-finite detector loss")
                 scaler.scale(loss * len(idx) / len(block)).backward()
-                loss_sum += float(loss.detach()) * len(idx)
+                block_loss += loss.detach() * len(idx) / len(block)
+                loss_sum += loss.detach() * len(idx)
                 seen += len(idx)
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(params, 5.0, error_if_nonfinite=True)
-            scaler.step(opt)
-            scaler.update()
-            opt.zero_grad(set_to_none=True)
+            completed, norm = gradient_step(scaler, opt, params, loss=block_loss)
+            if not completed:
+                overflows += 1
+                consecutive += 1
+                print(
+                    f"AMP overflow: skipped update, scale={scaler.get_scale():g}, consecutive={consecutive}",
+                    flush=True,
+                )
+                if consecutive >= 8:
+                    raise FloatingPointError(
+                        "Persistent non-finite gradients after 8 AMP scale reductions"
+                    )
+            else:
+                consecutive = 0
             updates += 1
+            progress.update(seen, batch=batch, amp_skips=overflows)
             if step_limit and updates >= step_limit:
                 break
             if (time.monotonic() - started) / 60 > cfg["train"]["max_minutes"]:
                 raise TimeoutError("Configured training time exceeded; run is incomplete")
         sch.step()
         history.append(
-            dict(epoch=epoch + 1, stage=stage, loss=loss_sum / max(seen, 1), scenes=seen)
+            dict(
+                epoch=epoch + 1, stage=stage, loss=float(loss_sum.cpu()) / max(seen, 1), scenes=seen
+            )
         )
-        print(cfg["name"], history[-1], flush=True)
+        progress.update(
+            seen, force=True, loss=history[-1]["loss"], batch=batch, amp_skips=overflows
+        )
         if step_limit and updates >= step_limit:
             break
     return (
@@ -254,6 +281,7 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
             scenes_per_second=sum(h["scenes"] for h in history) / (time.monotonic() - started),
             physical_batch=batch,
             batch_profile=batch_report,
+            amp_skipped_updates=overflows,
         ),
     )
 
@@ -263,12 +291,14 @@ def detector_bank(model, scenes, device, batch=128, topk=20):
     parts = []
     if device.type == "cpu":
         batch = min(batch, 2)
+    progress = Progress(f"{scenes.split}/detector", len(scenes.names), device)
     for start in range(0, len(scenes.names), batch):
         idx = np.arange(start, min(start + batch, len(scenes.names)))
         image = scenes.images(idx, device)
         with amp(device):
             out = model(image)
         parts.append(cpu_table(tables(out, image.shape[-2:], topk)))
+        progress.update(start + len(idx), batch=batch)
     return tuple(np.concatenate(v) for v in zip(*parts))
 
 
@@ -292,6 +322,7 @@ def train_head(cfg, scenes, bank, inputs, device, rng, step_limit=None):
     for epoch in range(cfg["siglip"]["head_epochs"]):
         head.train()
         order = rng.permutation(len(scenes.names))
+        progress = Progress(f"siglip/head_epoch{epoch + 1}", len(order), device)
         for start in range(0, len(order), 128):
             idx = order[start : start + 128]
             packed = scenes.batch(idx, device)
@@ -301,6 +332,7 @@ def train_head(cfg, scenes, bank, inputs, device, rng, step_limit=None):
             torch.nn.utils.clip_grad_norm_(head.parameters(), 5.0, error_if_nonfinite=True)
             opt.step()
             steps += 1
+            progress.update(start + len(idx))
             if step_limit and steps >= step_limit:
                 break
         sch.step()

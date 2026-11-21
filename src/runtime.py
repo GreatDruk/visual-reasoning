@@ -10,10 +10,75 @@ import threading
 import time
 import zipfile
 from contextlib import nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 
 import numpy as np
 import torch
+
+_MONITOR = ContextVar("foundation_monitor", default=None)
+
+
+class Progress:
+    """Low-frequency stage telemetry, relayed by the notebook process."""
+
+    def __init__(self, stage, total, device=None, interval=30):
+        self.stage, self.total, self.device = stage, total, device
+        self.started = self.last = time.monotonic()
+        self.interval = interval
+        self.update(0, force=True)
+
+    def update(self, done, force=False, **values):
+        now = time.monotonic()
+        if not force and done < self.total and now - self.last < self.interval:
+            return
+        elapsed = now - self.started
+        event = dict(
+            stage=self.stage,
+            done=done,
+            total=self.total,
+            seconds=round(elapsed, 1),
+            rate=round(done / max(elapsed, 1e-6), 2),
+            **values,
+        )
+        if self.device is not None and self.device.type == "cuda":
+            event["vram_gib"] = round(torch.cuda.memory_allocated(self.device) / 2**30, 2)
+            monitor = _MONITOR.get()
+            event["gpu_pct"] = (
+                monitor.values[-1] if monitor is not None and monitor.values else None
+            )
+        print("PROGRESS " + json.dumps(event), flush=True)
+        self.last = now
+
+
+def gradient_step(scaler, optimizer, parameters, *, loss=None, max_norm=5.0):
+    """Recover from AMP overflow without clipping or applying invalid gradients."""
+    scaler.unscale_(optimizer)
+    grads = [p.grad for p in parameters if p.grad is not None]
+    if not grads:
+        raise RuntimeError("Optimizer update has no gradients")
+    norms = torch._foreach_norm(grads, 2.0)
+    norm = torch.linalg.vector_norm(torch.stack(norms).float(), 2.0)
+    values = [norm]
+    if loss is not None:
+        values.append(loss.detach().float())
+    checked = torch.stack(values).detach().cpu().tolist()
+    if loss is not None and not np.isfinite(checked[1]):
+        raise FloatingPointError("Non-finite unscaled loss")
+    finite = np.isfinite(checked[0])
+    if finite:
+        coefficient = (max_norm / (norm + 1e-6)).clamp(max=1.0)
+        torch._foreach_mul_(grads, coefficient)
+    elif not scaler.is_enabled():
+        raise FloatingPointError("Non-finite full-precision gradients")
+    elif all(torch.isfinite(g).all().item() for g in grads):
+        # Norm overflow alone is not recorded by GradScaler's elementwise check.
+        raise FloatingPointError("Gradient norm overflow with finite gradient entries")
+    # unscale_ recorded inf/nan; GradScaler skips this optimizer update if needed.
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    return bool(finite), checked[0]
 
 
 def amp(device):
@@ -85,11 +150,11 @@ def profile_batches(device, sizes, count, step):
             item = dict(batch=n, oom=True)
         report.append(item)
         print("batch profile", json.dumps(item), flush=True)
-        if item.get("oom") or item["capacity_fraction"] > 0.90:
+        if item.get("oom") or item["capacity_fraction"] > 0.95:
             break
-    eligible = [row for row in report if row.get("capacity_fraction", 1) <= 0.90]
+    eligible = [row for row in report if row.get("capacity_fraction", 1) <= 0.95]
     if not eligible:
-        raise RuntimeError("No profiled batch left 10 percent VRAM headroom")
+        raise RuntimeError("No profiled batch left 5 percent VRAM headroom")
     fastest = max(row["items_per_second"] for row in eligible)
     selected = max(row["batch"] for row in eligible if row["items_per_second"] >= 0.97 * fastest)
     return selected, report
@@ -148,11 +213,12 @@ class Monitor:
         self.thread = None
 
     def __enter__(self):
+        self.token = _MONITOR.set(self)
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
             def collect():
-                while not self.stop.wait(1):
+                while not self.stop.wait(5):
                     try:
                         ordinal = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
                         s = subprocess.check_output(
@@ -178,6 +244,7 @@ class Monitor:
         self.stop.set()
         if self.thread:
             self.thread.join(timeout=3)
+        _MONITOR.reset(self.token)
 
     def report(self):
         return dict(

@@ -72,12 +72,16 @@ def dense_targets(parts, shape, stride, device, level=0, multiscale=False):
     return [torch.from_numpy(v).to(device) for v in (centers, regression, labels, uncertain)]
 
 
-def detection_loss(outputs, parts, soft=False):
+def detection_loss(outputs, parts=None, soft=False, targets=None):
     total = outputs[0].new_zeros(())
     for level, raw in enumerate(outputs):
         raw = raw.float()
-        center, reg, attr, uncertain = dense_targets(
-            parts, raw.shape[-2:], 4 * 2**level, raw.device, level, len(outputs) > 1
+        center, reg, attr, uncertain = (
+            targets[level]
+            if targets is not None
+            else dense_targets(
+                parts, raw.shape[-2:], 4 * 2**level, raw.device, level, len(outputs) > 1
+            )
         )
         present = center.bool()
         count = center.sum().clamp_min(1)

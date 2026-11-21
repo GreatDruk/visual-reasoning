@@ -24,13 +24,15 @@ def reference(inputs, frame, name):
         return data["score"].copy()
 
 
-def execute(config, data, inputs, work, output, seed=None, limit=None, steps=None):
+def execute(
+    config, data, inputs, work, output, seed=None, limit=None, steps=None, verified_inputs=False
+):
     cfg = load_config(config)
     if seed is not None:
         cfg["train"]["seed"] = seed
     seed = cfg["train"]["seed"]
     rng, device = setup(seed)
-    inputs, manifest = immutable_inputs(inputs)
+    inputs, manifest = immutable_inputs(inputs, verify=not verified_inputs)
     work = Path(work).resolve()
     if "artefacts" in work.parts:
         raise ValueError("Scratch must be separate from output-only artifacts")
@@ -91,6 +93,8 @@ def execute(config, data, inputs, work, output, seed=None, limit=None, steps=Non
             train = Scenes(data, "train", limit)
             if set(train.names) & set(val.names):
                 raise ValueError("Training and validation scenes overlap")
+            train.prepare_images(scratch_root / "images", device)
+            val.prepare_images(scratch_root / "images", device)
             teacher = Teacher(inputs / "teacher/train.npz", train)
             report["fit_scene_names"] = train.names.tolist()
             if cfg["family"] == "resnet":
@@ -225,8 +229,15 @@ def main():
     p.add_argument("--seed", type=int)
     p.add_argument("--limit", type=int)
     p.add_argument("--steps", type=int)
+    p.add_argument(
+        "--verified-inputs",
+        action="store_true",
+        help="Parent already verified the immutable manifest",
+    )
     a = p.parse_args()
-    execute(a.config, a.data, a.inputs, a.work, a.output, a.seed, a.limit, a.steps)
+    execute(
+        a.config, a.data, a.inputs, a.work, a.output, a.seed, a.limit, a.steps, a.verified_inputs
+    )
 
 
 if __name__ == "__main__":
