@@ -1,267 +1,212 @@
-"""Caption tables, image/feature sources and batch iteration."""
+"""Scene batches keep paired captions together and separate fit from evaluation."""
 
-from dataclasses import dataclass, field
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
-import polars as pl
+import pandas as pd
 import torch
+from PIL import Image
 
-from .text_aug import canonical_form, novel_form, paraphrases, swap_left_right
-from .utils import resolve_path
-from .twins import find_twins
-
-
-@dataclass
-class Split:
-    """Caption rows of one split. `img_idx` indexes the split's image source."""
-
-    name: str
-    ids: np.ndarray
-    image_names: list
-    img_idx: np.ndarray
-    captions: list
-    categories: np.ndarray
-    labels: np.ndarray | None = None
-    pair_ids: np.ndarray | None = None
-    source: object = field(default=None, repr=False)
-
-    def __len__(self):
-        return len(self.captions)
+from .programs import AND, EXACT, EXIST, FEWER, MORE, NONE, WORD_INDEX, parse_program
+from .text import canonical_form
 
 
-def load_split(name, csv_path):
-    """Read a csv; images are numbered in order of first appearance."""
-    df = pl.read_csv(resolve_path(csv_path))
-    if "label" in df.columns:
-        if "pair_id" not in df.columns:
-            raise ValueError(f"{name}: labelled rows require pair_id")
-        for key, pair in df.group_by("pair_id", maintain_order=True):
-            if pair.height != 2 or pair["image"].n_unique() != 1 or set(pair["label"].to_list()) != {0, 1} or key[0] is None:
-                raise ValueError(f"{name}: invalid labelled pair {key[0]!r}: expected two rows, one image, labels {{0, 1}}")
-    image_names = df["image"].unique(maintain_order=True).to_list()
-    pos = {n: i for i, n in enumerate(image_names)}
-    return Split(
-        name=name,
-        ids=df["id"].to_numpy(),
-        image_names=image_names,
-        img_idx=np.array([pos[n] for n in df["image"]], dtype=np.int64),
-        captions=df["caption"].str.to_lowercase().to_list(),
-        categories=df["category"].to_numpy(),
-        labels=df["label"].to_numpy() if "label" in df.columns else None,
-        pair_ids=df["pair_id"].to_numpy() if "pair_id" in df.columns else None,
+def encode_programs(programs, device):
+    def words(key):
+        return torch.tensor(
+            [
+                [WORD_INDEX[w] for w in getattr(p, key)] + [0] * (4 - len(getattr(p, key)))
+                for p in programs
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+
+    return dict(
+        a=words("a"),
+        b=words("b"),
+        ref=words("ref"),
+        ops=torch.tensor([p.op for p in programs], device=device),
+        numbers=torch.tensor([p.number for p in programs], device=device),
+        relations=torch.tensor([p.relation for p in programs], device=device),
     )
 
 
-def subset(split, mask):
-    """Select rows; compact image indexing only before attaching an image source."""
-    rows = np.nonzero(mask)[0]
-    pick = lambda v: None if v is None else v[rows]
-    image_names, img_idx = split.image_names, split.img_idx[rows]
-    if split.source is None:
-        used, img_idx = np.unique(img_idx, return_inverse=True)
-        image_names = [split.image_names[i] for i in used]
-    return Split(
-        name=split.name,
-        ids=split.ids[rows],
-        image_names=image_names,
-        img_idx=img_idx,
-        captions=[split.captions[r] for r in rows],
-        categories=split.categories[rows],
-        labels=pick(split.labels),
-        pair_ids=pick(split.pair_ids),
-        source=split.source,
-    )
+def reflected(program):
+    relation = {1: 2, 2: 1, 5: 6, 6: 5}.get(program.relation, program.relation)
+    return replace(program, relation=relation)
 
 
-def paraphrased(split, name=None):
-    """Rule-based paraphrasing diagnostic; shares rules with training augmentation."""
-    captions = [novel_form(c, cat) for c, cat in zip(split.captions, split.categories)]
-    return Split(**{**split.__dict__, "name": name or f"{split.name}_para", "captions": captions})
+def implications(program, truth):
+    if program.relation:
+        return (
+            [(program.a, 1)]
+            if truth and (program.op == EXIST or (program.op == EXACT and program.number > 0))
+            else []
+        )
+    if program.op == EXIST:
+        return [(program.a, truth)]
+    if program.op == NONE:
+        return [(program.a, 1 - truth)]
+    if not truth:
+        return []
+    if program.op == EXACT:
+        return [(program.a, int(program.number > 0))]
+    if program.op == AND:
+        return [(program.a, 1), (program.b, 1)]
+    if program.op in (MORE, FEWER):
+        return [(program.a if program.op == MORE else program.b, 1)]
+    return []
 
 
-def canonicalized(split):
-    """Rewrite every caption into its canonical train form (data.canonicalize)."""
-    captions = [canonical_form(c, cat) for c, cat in zip(split.captions, split.categories)]
-    return Split(**{**split.__dict__, "captions": captions})
-
-
-def concat_splits(a, b, name):
-    """Concatenate two labelled splits; image sources are chained with ConcatSource."""
-    offset = len(a.source)
-    pair_offset = int(a.pair_ids.max()) + 1
-    return Split(
-        name=name,
-        ids=np.concatenate([a.ids, b.ids]),
-        image_names=a.image_names + b.image_names,
-        img_idx=np.concatenate([a.img_idx, b.img_idx + offset]),
-        captions=a.captions + b.captions,
-        categories=np.concatenate([a.categories, b.categories]),
-        labels=np.concatenate([a.labels, b.labels]),
-        pair_ids=np.concatenate([a.pair_ids, b.pair_ids + pair_offset]),
-        source=ConcatSource([a.source, b.source]),
-    )
-
-
-class ArraySource:
-    """Per-image arrays (cached float16 feature maps, or uint8 images) with an optional
-    pre-flipped copy for horizontal-flip augmentation."""
-
-    def __init__(self, array, flipped=None, indices=None):
-        self.array, self.flipped = array, flipped
-        self.indices = indices
-
-    def __len__(self):
-        return len(self.array) if self.indices is None else len(self.indices)
-
-    def get(self, idx, flip=None):
-        if self.indices is not None:
-            idx = self.indices[idx]
-        out = np.asarray(self.array[idx])
-        if flip is not None and flip.any():
-            if self.flipped is None:
-                raise ValueError("flip requested but no flipped copy is cached")
-            out = out.copy()
-            out[flip] = np.asarray(self.flipped[idx[flip]])
-        return torch.from_numpy(np.ascontiguousarray(out))
-
-
-class ConcatSource:
-    def __init__(self, sources):
-        self.sources = sources
-        self.offsets = np.cumsum([0] + [len(s) for s in sources])
-
-    def __len__(self):
-        return int(self.offsets[-1])
-
-    def get(self, idx, flip=None):
-        flip = np.zeros(len(idx), bool) if flip is None else flip
-        parts, order = [], []
-        for k, s in enumerate(self.sources):
-            m = (idx >= self.offsets[k]) & (idx < self.offsets[k + 1])
-            if m.any():
-                parts.append(s.get(idx[m] - self.offsets[k], flip[m]))
-                order.append(np.nonzero(m)[0])
-        out = torch.cat(parts)
-        inv = np.empty(len(idx), np.int64)
-        inv[np.concatenate(order)] = np.arange(len(idx))
-        return out[torch.from_numpy(inv)]
-
-
-def pair_groups(split):
-    """Row indices grouped by pair_id: array [P, 2]."""
-    order = np.argsort(split.pair_ids, kind="stable")
-    rows = order.reshape(-1, 2)
-    return rows
-
-
-def sample_pairs_by_category(split, pairs_per_category, seed):
-    """Choose complete, category-balanced pairs before attaching image sources."""
-    if (isinstance(pairs_per_category, (bool, np.bool_))
-            or not isinstance(pairs_per_category, (int, np.integer)) or pairs_per_category <= 0):
-        raise ValueError(f"{split.name}: pairs_per_category must be a positive integer")
-    if split.labels is None or split.pair_ids is None:
-        raise ValueError(f"{split.name}: labels and pair_ids are required")
-    _, counts = np.unique(split.pair_ids, return_counts=True)
-    if not np.all(counts == 2):
-        raise ValueError(f"{split.name}: expected complete pairs")
-    groups = pair_groups(split)
-    categories = split.categories[groups]
-    mixed = categories[:, 0] != categories[:, 1]
-    if mixed.any():
-        pair_id = split.pair_ids[groups[np.flatnonzero(mixed)[0], 0]]
-        raise ValueError(f"{split.name}: mixed categories in pair_id {pair_id}")
-    rng = np.random.default_rng(seed)
-    mask = np.zeros(len(split), dtype=bool)
-    for category in sorted(set(categories[:, 0])):
-        available = groups[categories[:, 0] == category]
-        if len(available) < pairs_per_category:
+class Scenes:
+    def __init__(self, root, split, limit=None):
+        self.root = Path(root)
+        self.split = split
+        self.image_read_seconds = 0.0
+        frame = pd.read_csv(self.root / f"{split}.csv")
+        if not frame.id.is_unique:
+            raise ValueError("Duplicate row IDs")
+        if limit is not None:
+            frame = frame[frame.image.isin(frame.image.unique()[:limit])]
+        self.frame = frame.reset_index(drop=True)
+        self.scene, self.names = pd.factorize(self.frame.image, sort=False)
+        self.names = self.names.to_numpy(dtype=str)
+        self.rows = [np.flatnonzero(self.scene == i) for i in range(len(self.names))]
+        captions = [canonical_form(r.caption, r.category) for r in self.frame.itertuples()]
+        self.programs = [parse_program(c) for c in captions]
+        if any(p is None for p in self.programs):
             raise ValueError(
-                f"{split.name}: category {category}: requested {pairs_per_category}, available {len(available)}"
+                f"Unsupported captions: {[c for c, p in zip(captions, self.programs) if p is None][:3]}"
             )
-        selected = rng.choice(len(available), size=pairs_per_category, replace=False)
-        mask[available[selected].reshape(-1)] = True
-    return subset(split, mask)
+        self.pairs = np.array(
+            [
+                rows
+                for rows in self.frame.groupby(["image", "category"], sort=False).indices.values()
+            ],
+            dtype=np.int64,
+        )
+        if (
+            self.pairs.ndim != 2
+            or self.pairs.shape[1] != 2
+            or len(self.pairs) * 2 != len(self.frame)
+        ):
+            raise ValueError("Exactly two captions per image/category are required")
+        self.label = self.frame.label.to_numpy(dtype=np.float32) if "label" in frame else None
+        if self.label is not None and not np.all(self.label[self.pairs].sum(1) == 1):
+            raise ValueError("Every labelled pair must contain one true statement")
+        self.partner = np.empty(len(self.frame), dtype=np.int64)
+        a, b = self.pairs.T
+        self.partner[a] = b
+        self.partner[b] = a
+        self.aux = []
+        for rows in self.rows:
+            facts = set()
+            if split == "train":
+                for j in rows:
+                    for words, y in implications(self.programs[j], int(self.label[j])):
+                        if words and y:
+                            facts.add(words)
+                            facts.update((w,) for w in words)
+            self.aux.append(sorted(facts))
+
+    def images(self, indices, device):
+        started = time.perf_counter()
+
+        def read(i):
+            with Image.open(self.root / self.split / self.names[i]) as im:
+                return np.array(im.convert("RGB"))
+
+        with ThreadPoolExecutor(3) as pool:
+            pixels = np.stack(list(pool.map(read, indices)))
+        self.image_read_seconds += time.perf_counter() - started
+        return (
+            torch.from_numpy(pixels)
+            .to(device)
+            .permute(0, 3, 1, 2)
+            .float()
+            .div_(255)
+            .contiguous(memory_format=torch.channels_last)
+        )
+
+    def batch(self, indices, device, flips=None):
+        rows = np.concatenate([self.rows[i] for i in indices])
+        lookup = {n: i for i, n in enumerate(indices)}
+        scenes = np.array([lookup[i] for i in self.scene[rows]])
+        pos = {r: j for j, r in enumerate(rows)}
+        pairs = np.array([[pos[r], pos[self.partner[r]]] for r in rows if r < self.partner[r]])
+        programs = [
+            reflected(p) if flips is not None and flips[i] else p
+            for p, i in zip((self.programs[r] for r in rows), scenes)
+        ]
+        aux_scenes = []
+        aux_words = []
+        for i, n in enumerate(indices):
+            for words in self.aux[n]:
+                aux_scenes.append(i)
+                aux_words.append([WORD_INDEX[w] for w in words] + [0] * (4 - len(words)))
+        aux = (
+            None
+            if not aux_words
+            else (
+                torch.tensor(aux_scenes, device=device),
+                torch.tensor(aux_words, device=device),
+            )
+        )
+        return dict(
+            rows=rows,
+            scenes=torch.as_tensor(scenes, device=device),
+            programs=encode_programs(programs, device),
+            pairs=torch.as_tensor(pairs, device=device),
+            aux=aux,
+            label=None if self.label is None else torch.as_tensor(self.label[rows], device=device),
+            category=self.frame.category.to_numpy()[rows],
+        )
 
 
-def train_batches(split, batch_size, rng, aug, pair_sampler=True):
-    """Yield training batches as dicts.
+class Teacher:
+    def __init__(self, path, scenes):
+        if scenes.split != "train":
+            raise ValueError("Teacher targets may only be opened for train")
+        with np.load(path, allow_pickle=False) as z:
+            names = list(z["names"])
+            idx = np.array([names.index(n) for n in scenes.names])
+            self.fields = {k: z[k][idx].copy() for k in z.files if k != "names"}
+        self.names = scenes.names
 
-    With pair_sampler both twins of a pair land in the same batch and receive the same
-    augmentation (flip, paraphrase form), so the pair loss compares like with like.
-    aug: {"hflip_swap_lr": p, "reorder_clauses_p": p}.
-    """
-    if pair_sampler:
-        groups = pair_groups(split)
-        groups = groups[rng.permutation(len(groups))]
-        per_batch = max(1, batch_size // 2)
-        chunks = [groups[i : i + per_batch] for i in range(0, len(groups), per_batch)]
-    else:
-        perm = rng.permutation(len(split))
-        chunks = [perm[i : i + batch_size, None] for i in range(0, len(perm), batch_size)]
+    def batch(self, indices, flips):
+        parts = []
+        for i, flip in zip(indices, flips):
+            p = self.fields["p"][i]
+            valid = self.fields["valid"][i]
+            box = self.fields["boxes"][i].copy()
+            if flip:
+                box[:, 0] = 1 - box[:, 0] - box[:, 2]
+            attrs = [self.fields[k][i] for k in ("size", "color", "material", "shape")]
+            labels = np.stack([np.where(a.max(-1) >= 0.68, a.argmax(-1), -100) for a in attrs], -1)
+            parts.append((box, p, valid, labels))
+        return parts
 
-    p_flip = aug.get("hflip_swap_lr", 0.0)
-    p_para = aug.get("reorder_clauses_p", 0.0)
-    for chunk in chunks:
-        g, k = chunk.shape
-        flip = np.repeat(rng.random(g) < p_flip, k)
-        para = np.repeat(rng.random(g) < p_para, k)
-        form_u = np.repeat(rng.random(g), k)
-        rows = chunk.reshape(-1)
-        captions = []
-        for r, f, p, u in zip(rows, flip, para, form_u):
-            c = split.captions[r]
-            if p:
-                forms = paraphrases(c, split.categories[r])
-                c = forms[int(u * len(forms))]
-            if f:
-                c = swap_left_right(c)
-            captions.append(c)
-        batch = {
-            "rows": rows,
-            "img_idx": split.img_idx[rows],
-            "flip": flip,
-            "captions": captions,
-            "labels": torch.from_numpy(split.labels[rows]),
-        }
-        if pair_sampler:
-            # Model pairing is deliberately independent of the true/false loss order.
-            batch["twin_index"] = torch.arange(len(rows)).reshape(-1, 2)
-            lab = split.labels[rows].reshape(g, k)
-            base = np.arange(g) * 2
-            true_pos = base + np.argmax(lab, axis=1)
-            false_pos = base + np.argmin(lab, axis=1)
-            batch["pair_index"] = torch.from_numpy(np.stack([true_pos, false_pos], 1))
-        yield batch
-
-
-def eval_batches(split, batch_size, pairwise=False, pairing_keys=None):
-    if pairwise:
-        if batch_size < 2 or batch_size % 2:
-            raise ValueError("pair-choice evaluation requires an even batch_size >= 2")
-        names = [split.image_names[i] for i in split.img_idx]
-        # Use precisely the metadata available at test time, never labels/pair_ids.
-        pairs = find_twins(names, split.captions, split.categories if pairing_keys is None else pairing_keys)
-        if not np.array_equal(np.sort(pairs.flatten()), np.arange(len(split))):
-            raise ValueError(f"{split.name}: pair-choice inference needs a twin for every row")
-        for i in range(0, len(pairs), batch_size // 2):
-            rows = pairs[i:i + batch_size // 2].flatten()
-            yield {"rows": rows, "img_idx": split.img_idx[rows],
-                   "flip": np.zeros(len(rows), bool),
-                   "captions": [split.captions[r] for r in rows],
-                   "twin_index": torch.arange(len(rows)).reshape(-1, 2)}
-        return
-    for i in range(0, len(split), batch_size):
-        rows = np.arange(i, min(i + batch_size, len(split)))
-        yield {
-            "rows": rows,
-            "img_idx": split.img_idx[rows],
-            "flip": np.zeros(len(rows), bool),
-            "captions": [split.captions[r] for r in rows],
-        }
-
-
-def save_submission(ids, probs, path, target_col="label"):
-    path = resolve_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({"id": ids, target_col: probs}).write_csv(path)
-    return path
+    def crop_labels(self, indices, boxes):
+        result = np.full((len(indices), 4), -100, np.int64)
+        for j, (i, b) in enumerate(zip(indices, boxes)):
+            f = self.fields
+            ref = f["boxes"][i]
+            inter = (
+                (np.minimum(b[:2] + b[2:], ref[:, :2] + ref[:, 2:]) - np.maximum(b[:2], ref[:, :2]))
+                .clip(0)
+                .prod(-1)
+            )
+            iou = inter / (b[2:].prod() + ref[:, 2:].prod(-1) - inter).clip(1e-8)
+            iou = np.where(f["valid"][i] & (f["p"][i] > 0.86), iou, 0)
+            if iou.max() < 0.55:
+                continue
+            k = iou.argmax()
+            for g, key in enumerate(("size", "color", "material", "shape")):
+                prob = f[key][i, k]
+                if prob.max() >= 0.8:
+                    result[j, g] = prob.argmax()
+        return result

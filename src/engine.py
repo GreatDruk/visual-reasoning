@@ -1,0 +1,309 @@
+"""Shared inference and train-only optimization for the visual foundation."""
+
+import time
+
+import numpy as np
+import torch
+
+from .detectors import Detector, dense_table, tables
+from .heads import FEATURES, GROUPS, N_ATTRS, TableHead, load_head, probabilities
+from .losses import caption_loss, detection_loss, map_count_loss
+from .native import CenterDetector
+from .posterior import sample_scene_scores
+from .runtime import amp, load_state, profile_batches
+
+
+def cpu_table(parts):
+    return tuple(x.detach().cpu().numpy() for x in parts)
+
+
+def device_table(parts, device):
+    return tuple(torch.as_tensor(x, device=device) for x in parts)
+
+
+@torch.inference_mode()
+def proposal_tables(scenes, inputs, settings, source, device, batch=128):
+    if source == "resnet":
+        control = dict(settings, backbone="resnet", neck="sum", separate=False, width=64)
+        model = Detector(control)
+        model.load_state_dict(load_state(inputs / "reference/r50_img.pt"))
+        matrix = None
+    else:
+        model = CenterDetector()
+        model.load_state_dict(load_state(inputs / "reference/thaw.pt"))
+        gen = torch.Generator().manual_seed(217)
+        matrix = torch.linalg.qr(torch.randn(40, 3 + N_ATTRS, generator=gen))[0].to(device)
+    model = model.to(device, memory_format=torch.channels_last).eval()
+    parts = []
+    if device.type == "cpu":
+        batch = min(batch, 8)
+    for start in range(0, len(scenes.names), batch):
+        images = scenes.images(np.arange(start, min(start + batch, len(scenes.names))), device)
+        with amp(device):
+            if matrix is None:
+                outputs = tables(model(images), images.shape[-2:])
+            else:
+                latent = model.features(images)
+                raw = model.head(latent)
+                descriptor = torch.einsum("bdhw,ds->bshw", latent, matrix)
+                outputs = dense_table(raw.float(), latent=descriptor.float())
+        parts.append(cpu_table(outputs))
+    return tuple(np.concatenate(v) for v in zip(*parts))
+
+
+@torch.inference_mode()
+def predict(scenes, head, bank, device, draws=1024):
+    head.eval()
+    parts = []
+    for start in range(0, len(bank[0]), 256):
+        part = device_table(tuple(a[start : start + 256] for a in bank), device)
+        parts.append(cpu_table(probabilities(head, part)))
+    p, xy, valid, *attrs = (np.concatenate(v) for v in zip(*parts))
+    score = np.zeros(len(scenes.frame), np.float64)
+    offsets = head.relation_offset.detach().cpu().numpy()
+    for i, rows in enumerate(scenes.rows):
+        pair = scenes.pairs[np.isin(scenes.pairs[:, 0], rows)]
+        local = np.searchsorted(rows, pair)
+        keep = valid[i]
+        score[rows] = sample_scene_scores(
+            [scenes.programs[j] for j in rows],
+            local,
+            p[i, keep],
+            [(g, a[i, keep]) for g, a in zip(GROUPS, attrs)],
+            xy[i, keep],
+            offsets,
+            42,
+            draws,
+        )
+    return score
+
+
+def initial_head(inputs, features=FEATURES, source=None):
+    teacher = load_state(inputs / "reference/scene_silhouette.pt")
+    teacher["relation_offset"].zero_()
+    head = TableHead(features, teacher)
+    if source:
+        load_head(head, load_state(inputs / "reference" / source))
+    return head
+
+
+def photometric(images, rng, amount):
+    if not amount:
+        return images
+    brightness = torch.as_tensor(
+        rng.uniform(1 - amount, 1 + amount, (len(images), 1, 1, 1)),
+        device=images.device,
+        dtype=images.dtype,
+    )
+    contrast = torch.as_tensor(
+        rng.uniform(1 - amount, 1 + amount, (len(images), 1, 1, 1)),
+        device=images.device,
+        dtype=images.dtype,
+    )
+    mean = images.mean((1, 2, 3), keepdim=True)
+    return ((images - mean) * contrast + mean).mul(brightness).clamp(0, 1)
+
+
+def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
+    weight_name = "resnet50" if cfg["model"]["backbone"] == "resnet" else "convnext"
+    model = Detector(cfg["model"], inputs / "pretrained" / f"{weight_name}.pth").to(
+        device, memory_format=torch.channels_last
+    )
+    head = initial_head(inputs).to(device)
+    params = [*model.parameters(), *head.parameters()]
+    opt = torch.optim.AdamW(
+        [
+            dict(params=model.parameters(), lr=cfg["train"]["rate"]),
+            dict(params=head.parameters(), lr=cfg["train"]["head_rate"]),
+        ]
+    )
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, cfg["train"]["epochs"], eta_min=cfg["train"]["rate"] * 0.08
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    batch = cfg["train"]["batch"] if device.type == "cuda" else min(2, cfg["train"]["batch"])
+    batch_report = []
+    if device.type == "cuda" and cfg["train"].get("calibrate", True):
+        saved_buffers = {name: t.clone() for name, t in model.named_buffers()}
+        cpu_rng = torch.get_rng_state()
+        gpu_rng = torch.cuda.get_rng_state(device)
+        model.train()
+        head.train()
+
+        def probe(n):
+            idx = np.arange(n)
+            image = scenes.images(idx, device)
+            with amp(device):
+                out = model(image)
+            bank = tables(out, image.shape[-2:], cfg["model"]["topk"])
+            weak = caption_loss(head, bank, scenes.batch(idx, device))
+            with amp(device):
+                extra = model(image)
+            loss = weak + cfg["train"]["detection_weight"] * detection_loss(
+                extra, teacher.batch(idx, np.zeros(n, bool)), cfg["train"]["soft_background"]
+            )
+            try:
+                loss.backward()
+            finally:
+                model.zero_grad(set_to_none=True)
+                head.zero_grad(set_to_none=True)
+
+        batch, batch_report = profile_batches(
+            device, [n for n in (16, 32, 64, 128) if n <= batch], len(scenes.names), probe
+        )
+        with torch.no_grad():
+            for name, t in model.named_buffers():
+                t.copy_(saved_buffers[name])
+        torch.set_rng_state(cpu_rng)
+        torch.cuda.set_rng_state(gpu_rng, device)
+    effective = (
+        cfg["train"]["effective_batch"] if device.type == "cuda" and not step_limit else batch
+    )
+    if effective % batch:
+        raise ValueError("Physical batch must divide the effective batch")
+    history = []
+    updates = 0
+    started = time.monotonic()
+    for epoch in range(cfg["train"]["epochs"]):
+        stage = (
+            "objects"
+            if epoch < cfg["train"]["stages"][0]
+            else "simple"
+            if epoch < sum(cfg["train"]["stages"][:2])
+            else "all"
+        )
+        model.train()
+        head.train()
+        loss_sum = 0.0
+        seen = 0
+        order = rng.permutation(len(scenes.names))
+        opt.zero_grad(set_to_none=True)
+        for begin in range(0, len(order), effective):
+            block = order[begin : begin + effective]
+            for start in range(0, len(block), batch):
+                idx = block[start : start + batch]
+                image = scenes.images(idx, device)
+                flip = (
+                    rng.random(len(idx)) < 0.5
+                    if cfg["train"]["joint_flip"]
+                    else np.zeros(len(idx), bool)
+                )
+                image = torch.where(
+                    torch.as_tensor(flip, device=device)[:, None, None, None],
+                    image.flip(-1),
+                    image,
+                )
+                image = photometric(image, rng, cfg["train"]["photometric"])
+                packed = scenes.batch(idx, device, flip)
+                with amp(device):
+                    out = model(image)
+                bank = tables(out, image.shape[-2:], cfg["model"]["topk"])
+                loss = out[0].sum() * 0
+                if stage != "objects":
+                    loss = caption_loss(head, bank, packed, simple=stage == "simple")
+                # Control: a separate, mirrored pseudo-supervised pass; joint-flip arm
+                # uses the same transformed image for caption and object supervision.
+                det_flip = flip if cfg["train"]["joint_flip"] else rng.random(len(idx)) < 0.5
+                det_image = (
+                    image
+                    if cfg["train"]["joint_flip"]
+                    else torch.where(
+                        torch.as_tensor(det_flip, device=device)[:, None, None, None],
+                        image.flip(-1),
+                        image,
+                    )
+                )
+                # Keep two forwards in both arms, including BN update frequency.
+                with amp(device):
+                    det_out = model(det_image)
+                target = teacher.batch(idx, det_flip)
+                loss += cfg["train"]["detection_weight"] * detection_loss(
+                    det_out, target, cfg["train"]["soft_background"]
+                )
+                if cfg["train"]["count_weight"] and stage != "objects":
+                    loss += cfg["train"]["count_weight"] * map_count_loss(out[0], packed)
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("Non-finite detector loss")
+                scaler.scale(loss * len(idx) / len(block)).backward()
+                loss_sum += float(loss.detach()) * len(idx)
+                seen += len(idx)
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(params, 5.0, error_if_nonfinite=True)
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
+            updates += 1
+            if step_limit and updates >= step_limit:
+                break
+            if (time.monotonic() - started) / 60 > cfg["train"]["max_minutes"]:
+                raise TimeoutError("Configured training time exceeded; run is incomplete")
+        sch.step()
+        history.append(
+            dict(epoch=epoch + 1, stage=stage, loss=loss_sum / max(seen, 1), scenes=seen)
+        )
+        print(cfg["name"], history[-1], flush=True)
+        if step_limit and updates >= step_limit:
+            break
+    return (
+        model.eval(),
+        head.eval(),
+        dict(
+            history=history,
+            updates=updates,
+            training_seconds=time.monotonic() - started,
+            scenes_per_second=sum(h["scenes"] for h in history) / (time.monotonic() - started),
+            physical_batch=batch,
+            batch_profile=batch_report,
+        ),
+    )
+
+
+@torch.inference_mode()
+def detector_bank(model, scenes, device, batch=128, topk=20):
+    parts = []
+    if device.type == "cpu":
+        batch = min(batch, 2)
+    for start in range(0, len(scenes.names), batch):
+        idx = np.arange(start, min(start + batch, len(scenes.names)))
+        image = scenes.images(idx, device)
+        with amp(device):
+            out = model(image)
+        parts.append(cpu_table(tables(out, image.shape[-2:], topk)))
+    return tuple(np.concatenate(v) for v in zip(*parts))
+
+
+def train_head(cfg, scenes, bank, inputs, device, rng, step_limit=None):
+    head = initial_head(inputs, bank[0].shape[-1]).to(device)
+    # Warm-start only the shared table columns; crop columns initially have zero effect.
+    warm = initial_head(inputs, source="thaw_head.pt").state_dict()
+    state = head.state_dict()
+    for key, value in warm.items():
+        if key == "residual.0.weight":
+            state[key].zero_()
+            state[key][:, :FEATURES].copy_(value)
+        else:
+            state[key].copy_(value)
+    head.load_state_dict(state)
+    opt = torch.optim.AdamW(head.parameters(), lr=cfg["siglip"]["head_rate"], weight_decay=0.0001)
+    sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, cfg["siglip"]["head_epochs"], eta_min=cfg["siglip"]["head_min_rate"]
+    )
+    steps = 0
+    for epoch in range(cfg["siglip"]["head_epochs"]):
+        head.train()
+        order = rng.permutation(len(scenes.names))
+        for start in range(0, len(order), 128):
+            idx = order[start : start + 128]
+            packed = scenes.batch(idx, device)
+            loss = caption_loss(head, device_table(tuple(x[idx] for x in bank), device), packed)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(head.parameters(), 5.0, error_if_nonfinite=True)
+            opt.step()
+            steps += 1
+            if step_limit and steps >= step_limit:
+                break
+        sch.step()
+        if step_limit and steps >= step_limit:
+            break
+    return head.eval()
