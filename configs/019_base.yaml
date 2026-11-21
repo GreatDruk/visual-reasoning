@@ -34,6 +34,7 @@ siglip:
   pool_epochs: 4
   pool_batch: 384
   extract_batch: 64
+  max_extract_batch: 512
   head_epochs: 10
   head_rate: 0.002
   head_min_rate: 0.0003

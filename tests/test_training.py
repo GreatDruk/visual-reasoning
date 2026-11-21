@@ -118,6 +118,7 @@ def test_crop_training_runs_pooling_projection_head_and_adaptation(tmp_path, mon
     scores = predict(val, head, bank, torch.device("cpu"), draws=16)
     assert scores.shape == (4,) and np.isfinite(scores).all()
     assert report["matched_crops"] == 2
+    assert report["reused_train_tokens"] == (config != "038_siglip")
     assert not (tmp_path / "pool.npy").exists()
     assert bank[0].shape == (2, 1, 166)
     assert all(torch.is_tensor(x) for x in projection.state().values())

@@ -13,7 +13,7 @@ from sklearn.decomposition import PCA
 from .engine import device_table, train_head
 from .heads import BOX
 from .losses import caption_loss
-from .runtime import amp, profile_batches
+from .runtime import Progress, amp, gradient_step, profile_batches
 from .siglip import Vision, attribute_loss, crop_images
 
 
@@ -58,8 +58,9 @@ def warm_pool(vision, crops, cfg, work, device, rng, step_limit=None):
         raise OSError(f"Pooling cache needs {required / 2**30:.1f} GiB plus 2 GiB of free scratch")
     with token_storage(path, (n, grid * grid, width)) as tokens:
         vision.eval()
-        batch = settings["extract_batch"] if device.type == "cuda" else 2
+        batch = settings.get("max_extract_batch", 512) if device.type == "cuda" else 2
         started = time.monotonic()
+        progress = Progress("siglip/train_tokens", n, device)
 
         def probe(n):
             rows = np.arange(n)
@@ -68,7 +69,7 @@ def warm_pool(vision, crops, cfg, work, device, rng, step_limit=None):
                 vision.reduce(hidden)
 
         batch, batch_report = profile_batches(
-            device, [n for n in (16, 32, 64, 128) if n <= batch], n, probe
+            device, [size for size in (16, 32, 64, 128, 256, 512) if size <= batch], n, probe
         )
         vision.extraction_batch = batch
         with torch.no_grad():
@@ -77,8 +78,7 @@ def warm_pool(vision, crops, cfg, work, device, rng, step_limit=None):
                 with amp(device):
                     hidden, _ = vision.tokens(crops.pixels(rows, device, settings))
                 tokens[rows] = vision.reduce(hidden).half().cpu().numpy()
-                if start % (batch * 20) == 0:
-                    print("crop cache", start + len(rows), n, flush=True)
+                progress.update(start + len(rows), batch=batch)
         tokens.flush()
         usable = np.flatnonzero((crops.labels >= 0).any(-1))
         if not len(usable):
@@ -86,8 +86,17 @@ def warm_pool(vision, crops, cfg, work, device, rng, step_limit=None):
         opt = torch.optim.AdamW(
             [*vision.pool.parameters(), *vision.classifier.parameters()], lr=settings["pool_rate"]
         )
-        scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+        scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda", init_scale=128.0)
         steps = 0
+        skipped = 0
+        consecutive = 0
+        parameters = [*vision.pool.parameters(), *vision.classifier.parameters()]
+        progress = Progress(
+            "siglip/pooling",
+            settings["pool_epochs"]
+            * ((len(usable) + settings["pool_batch"] - 1) // settings["pool_batch"]),
+            device,
+        )
         vision.pool.train()
         vision.classifier.train()
         for epoch in range(settings["pool_epochs"]):
@@ -101,13 +110,34 @@ def warm_pool(vision, crops, cfg, work, device, rng, step_limit=None):
                 loss = attribute_loss(scores, labels)
                 opt.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
-                scaler.step(opt)
-                scaler.update()
+                completed, _ = gradient_step(
+                    scaler, opt, parameters, loss=loss, max_norm=float("inf")
+                )
+                skipped += not completed
+                consecutive = 0 if completed else consecutive + 1
+                if consecutive >= 8:
+                    raise FloatingPointError("Persistent non-finite pooling gradients")
                 steps += 1
+                progress.update(steps, amp_skips=skipped)
                 if step_limit and steps >= step_limit:
                     break
             if step_limit and steps >= step_limit:
                 break
+        # The trunk is frozen throughout this phase. Reuse its exact cached FP16
+        # tokens instead of running all 27 transformer blocks on train a second time.
+        raw = None
+        if not settings["intermediate"]:
+            raw = np.empty((n, width), np.float32)
+            vision.pool.eval()
+            progress = Progress("siglip/cached_train_embeddings", n, device)
+            with torch.no_grad():
+                for start in range(0, n, settings["pool_batch"]):
+                    end = min(start + settings["pool_batch"], n)
+                    x = torch.from_numpy(tokens[start:end].astype(np.float32)).to(device)
+                    with amp(device):
+                        value = vision.pool(x)
+                    raw[start:end] = value.float().cpu().numpy()
+                    progress.update(end)
     return dict(
         warmup_seconds=time.monotonic() - started,
         matched_crops=len(usable),
@@ -115,7 +145,9 @@ def warm_pool(vision, crops, cfg, work, device, rng, step_limit=None):
         peak_token_cache_gib=required / 2**30,
         extraction_batch=batch,
         batch_profile=batch_report,
-    )
+        amp_skipped_pool_updates=skipped,
+        reused_train_tokens=raw is not None,
+    ), raw
 
 
 @torch.inference_mode()
@@ -127,11 +159,13 @@ def embeddings(vision, crops, cfg, device):
         else 2
     )
     vision.eval()
+    progress = Progress(f"siglip/{crops.scenes.split}_embeddings", len(crops.scene), device)
     for start in range(0, len(crops.scene), batch):
         rows = np.arange(start, min(start + batch, len(crops.scene)))
         with amp(device):
             value = vision.embedding(crops.pixels(rows, device, cfg["siglip"]))
         parts.append(value.float().cpu().numpy())
+        progress.update(start + len(rows), batch=batch)
     return np.concatenate(parts)
 
 
@@ -203,9 +237,11 @@ def adapt(vision, head, crops, projection, cfg, device, rng, step_limit=None):
         ],
         weight_decay=0.0001,
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda", init_scale=128.0)
     started = time.monotonic()
     last = 0.0
+    skipped = consecutive = 0
+    progress = Progress("siglip/adaptation", steps, device)
     for step in range(steps):
         indices = rng.choice(
             len(crops.scenes.names),
@@ -246,22 +282,25 @@ def adapt(vision, head, crops, projection, cfg, device, rng, step_limit=None):
         bank = (torch.cat((x, extra), -1), xy, valid)
         packed = crops.scenes.batch(indices, device)
         loss += caption_loss(head, bank, packed)
-        if not torch.isfinite(loss):
-            raise FloatingPointError("Non-finite visual adaptation loss")
         opt.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
-        scaler.unscale_(opt)
-        torch.nn.utils.clip_grad_norm_(params, 5.0, error_if_nonfinite=True)
-        scaler.step(opt)
-        scaler.update()
+        completed, _ = gradient_step(scaler, opt, params, loss=loss)
+        if not completed:
+            skipped += 1
+            consecutive += 1
+            print(f"AMP overflow in adaptation: scale={scaler.get_scale():g}", flush=True)
+            if consecutive >= 8:
+                raise FloatingPointError("Persistent non-finite adaptation gradients")
+        else:
+            consecutive = 0
         last = float(loss.detach())
-        if (step + 1) % 50 == 0:
-            print("adaptation", step + 1, steps, last, flush=True)
+        progress.update(step + 1, loss=last, amp_skips=skipped)
     vision.adapting = False
     return dict(
         adaptation_steps=steps,
         adaptation_seconds=time.monotonic() - started,
         last_adaptation_loss=last,
+        amp_skipped_adaptation_updates=skipped,
     )
 
 
@@ -286,12 +325,15 @@ def train_siglip(
     waiting = time.monotonic()
     with FileLock(cache_lock or Path(work) / "pool.lock"):
         waited = time.monotonic() - waiting
-        report = warm_pool(vision, train_crops, cfg, work, device, rng, step_limit)
+        report, raw = warm_pool(vision, train_crops, cfg, work, device, rng, step_limit)
     report["cache_wait_seconds"] = waited
-    raw = embeddings(vision, train_crops, cfg, device)
+    if raw is None:
+        raw = embeddings(vision, train_crops, cfg, device)
+    progress = Progress("siglip/PCA_and_scene_head", 1, device)
     projection = Projection(raw, train_crops)
     train_bank = feature_table(train_crops, raw, projection)
     head = train_head(cfg, train, train_bank, inputs, device, rng, step_limit)
+    progress.update(1, force=True)
     report.update(adapt(vision, head, train_crops, projection, cfg, device, rng, step_limit))
     val_raw = embeddings(vision, val_crops, cfg, device)
     return (

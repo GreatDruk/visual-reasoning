@@ -53,7 +53,7 @@ class Vision(nn.Module):
             from transformers import SiglipVisionModel
 
             model = SiglipVisionModel.from_pretrained(
-                folder, local_files_only=True, attn_implementation="eager"
+                folder, local_files_only=True, attn_implementation="sdpa"
             )
         self.backbone = model
         self.core = getattr(model, "vision_model", model)
