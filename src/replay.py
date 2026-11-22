@@ -10,7 +10,7 @@ import pandas as pd
 from .config import load_config
 from .data import Scenes
 from .evidence import compose
-from .foundations import read_bundle
+from .foundations import aligned_score, read_bundle
 from .metrics import compare, metrics
 from .submit import export_csv, write_npz
 
@@ -47,17 +47,26 @@ def load_parts(root, manifest, scenes):
                 parts[key] = value[rows].copy()
             if not np.isfinite(parts[key]).all():
                 raise ValueError("Non-finite frozen component")
+    for key, split_roles in metadata.get("extra_scores", {}).items():
+        parts[key] = aligned_score(
+            root, manifest["assets"][split_roles[scenes.split]], scenes.frame
+        )
     return parts, metadata
 
 
-def replacement(scenes, branch, root, manifest, return_matched=False):
+def replacement(scenes, branch, root, manifest, return_matched=False, matched_seed=421):
     parts, metadata = load_parts(root, manifest, scenes)
     settings = metadata["leader_settings"]
     control = compose(scenes, parts, settings)[0]["final"]
     if return_matched:
-        matched = compose(scenes, {**parts, "count54_853": parts["count54_421"]}, settings)[0][
-            "final"
-        ]
+        source = parts.get(f"count54_{matched_seed}")
+        matched = (
+            compose(scenes, {**parts, "count54_421": source, "count54_853": source}, settings)[0][
+                "final"
+            ]
+            if source is not None
+            else None
+        )
     # Replace the previous count expert, never add another count layer on top.
     parts["count54_421"] = parts["count54_853"] = branch
     candidate, swaps = compose(scenes, parts, settings)
