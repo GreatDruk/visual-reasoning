@@ -80,3 +80,15 @@ def test_frozen_components_reject_duplicate_ids(bundle):
     np.savez(root / "parts.npz", ids=[7, 7], hidden=np.zeros((1, 96)))
     with pytest.raises(ValueError, match="Duplicate"):
         load_parts(root, manifest, scenes)
+
+
+def test_matched_control_uses_the_requested_seed(bundle):
+    root, manifest, scenes = bundle
+    with np.load(root / "parts.npz") as z:
+        values = {k: z[k].copy() for k in z.files}
+    values["count54_853"] *= 1.5
+    np.savez(root / "parts.npz", **values)
+    _, _, _, matched = replacement(
+        scenes, np.zeros(2), root, manifest, return_matched=True, matched_seed=853
+    )
+    np.testing.assert_array_equal(matched, [6.0, -6.0])
