@@ -340,15 +340,19 @@ def execute(
             from .replay import replacement
 
             old, new, swapped, matched = replacement(
-                val, branch, root, manifest, return_matched=True
+                val, branch, root, manifest, return_matched=True, matched_seed=cfg["train"]["seed"]
             )
-            leader = dict(control=old, candidate=new, matched054_421=matched)
+            leader = dict(control=old, candidate=new)
+            if matched is not None:
+                leader[f"matched054_{cfg['train']['seed']}"] = matched
             report["leader_replacement"] = dict(
                 control=metrics(val.frame, old),
                 candidate=metrics(val.frame, new),
                 comparison=compare(val.frame, old, new, 0),
-                matched_control=metrics(val.frame, matched),
-                matched_comparison=compare(val.frame, matched, new, 0),
+                matched_control=metrics(val.frame, matched) if matched is not None else None,
+                matched_comparison=compare(val.frame, matched, new, 0)
+                if matched is not None
+                else None,
                 swapped_pairs=swapped,
                 scope="Replace the mean054 slot of fixed public 057; other components unchanged",
             )
