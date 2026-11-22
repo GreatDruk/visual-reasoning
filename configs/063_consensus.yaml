@@ -1,0 +1,5 @@
+parent: 057_quality
+hypothesis: Keep 057 fixed but abstain from auxiliary count swaps when the primary
+  counter disagrees. No new numerical thresholds and no changes to other branches.
+blend:
+  confirm_primary: true

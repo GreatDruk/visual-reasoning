@@ -1,0 +1,5 @@
+parent: 057_quality
+hypothesis: Replace only the paired ConvNeXt counter seed421 with unpaired 060 seed421;
+  retain the seed853 counter, all weights, and the original auxiliary agreement.
+blend:
+  count_primary: count60_421

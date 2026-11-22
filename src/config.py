@@ -40,6 +40,9 @@ def load_config(path, stack=()):
             raise ValueError("Unexpected submission configuration fields")
         blend = result["blend"]
         blend.setdefault("swap_source", "count53")
+        blend.setdefault("count_primary", "count54_421")
+        blend.setdefault("count_secondary", "count54_853")
+        blend.setdefault("confirm_primary", False)
         if set(blend) != {
             "base",
             "counter_weight",
@@ -47,10 +50,21 @@ def load_config(path, stack=()):
             "hidden_weight",
             "swap",
             "swap_source",
+            "count_primary",
+            "count_secondary",
+            "confirm_primary",
         }:
             raise ValueError("Unexpected submission blend settings")
         if blend["swap_source"] not in ("count53", "count54"):
             raise ValueError("Unknown count agreement source")
+        if not all(
+            re.fullmatch(r"count\d+_\d+", blend[k]) for k in ("count_primary", "count_secondary")
+        ):
+            raise ValueError("Invalid count component role")
+        if not isinstance(blend["confirm_primary"], bool) or (
+            blend["confirm_primary"] and not blend["counter_weight"]
+        ):
+            raise ValueError("Primary confirmation requires a primary counter")
         if blend["base"] not in ("compact", "quality") or not isinstance(blend["swap"], bool):
             raise ValueError("Invalid submission base or swap")
         if any(not 0 <= blend[k] <= 1 for k in ("counter_weight", "tta_weight", "hidden_weight")):
