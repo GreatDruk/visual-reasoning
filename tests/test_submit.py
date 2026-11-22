@@ -122,3 +122,23 @@ def test_slim_does_not_require_r50_counter_checkpoints(tmp_path):
     assert component_path(tmp_path, "val", "visual", full) == component_path(
         tmp_path, "val", "visual", small
     )
+
+
+def test_primary_disagreement_blocks_an_auxiliary_swap():
+    s = scenes()
+    base = np.array([0.2, -0.2, 0.1, -0.1])
+    expert = np.array([-5.0, 5.0, -5.0, 5.0])
+    primary = -expert
+    result, count = guarded_swap(s, base, expert, expert, primary=primary)
+    np.testing.assert_array_equal(result, base)
+    assert count == 0
+    _, count = guarded_swap(s, base, expert, expert, primary=expert)
+    assert count == 1
+
+
+def test_mixed_configuration_replaces_only_one_counter_dependency():
+    mixed = load_config("configs/062_mixed.yaml")
+    roles = counter_dependencies([mixed])
+    assert "count60_421" in roles and "count54_853" in roles
+    assert "count54_421" not in roles
+    assert "count53_421" in roles and "count53_853" in roles
