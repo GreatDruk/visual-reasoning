@@ -4,6 +4,8 @@ Public control: **057_quality — 0.99978**, reported by the team. The current s
 
 ## Run the current study
 
+Study 064/065 is complete and is not recommended for another run or submission: neither repairs an error of 057; native refit introduces one error and doubled resolution introduces three. The instructions below reproduce the completed study. Retain 057; detailed count and pair attribution is recorded in KaggleTemplate.md.
+
 Update the existing runtime private dataset with `artefacts/kaggle/detail.zip`; retain the original base input dataset. Attach only one runtime overlay. Kaggle unpacks ZIP uploads automatically. Open the single `notebooks/base.ipynb`, choose T4 ×2, Internet Off, and Restart & Run All.
 
 Defaults:
