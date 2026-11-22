@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -80,9 +81,11 @@ def graph():
     return jobs, priority
 
 
-def manifest(project, work):
+def manifest(project, work, historical_warmup=False):
     cfg = load_config(Path(project) / "configs/044_convnext.yaml")
-    cfg["train"].update(seed=853, epochs=21, batch=64, calibrate=False)
+    cfg["train"].update(
+        seed=853, epochs=21, batch=128 if historical_warmup else 64, calibrate=historical_warmup
+    )
     roles = {f"count{n}_{s}": f"count{n}_{s}.pt" for n in (53, 54) for s in (421, 853)}
     roles.update(union421="union421.pt", union853="union853.pt", donors="donors.npz")
     donor = Path(work) / "donors.npz"
@@ -165,7 +168,7 @@ def execute(stage, project, data, assets, work, *, limit=None, steps=None):
     raise ValueError(f"Unknown final stage {stage}")
 
 
-def inference(stage, project, data, work, device, *, limit=None):
+def inference(stage, project, data, work, device, *, limit=None, historical_warmup=False):
     from .data import Scenes
     from .evidence import compose, hidden_classes, placement_prior
     from .foundations import aligned_score
@@ -175,7 +178,7 @@ def inference(stage, project, data, work, device, *, limit=None):
     scenes.prepare_images(
         Path(work) / "images", device if stage != "export" else torch.device("cpu")
     )
-    m = manifest(project, work)
+    m = manifest(project, work, historical_warmup=historical_warmup)
     if stage == "visual":
         parts = visual(scenes, Path(work) / "inputs", Path(work), m, device, Path(project))
     elif stage.startswith("counter"):
@@ -194,6 +197,7 @@ def inference(stage, project, data, work, device, *, limit=None):
                 parts.update({k: z[k].copy() for k in z.files if k != "ids"})
         cfg = load_config(Path(project) / "configs/057_quality.yaml")
         values, swaps = compose(scenes, parts, cfg["blend"])
+        write_npz(Path(work) / "test_composed.npz", ids=scenes.frame.id.to_numpy(), **values)
         sample = pd.read_csv(Path(data) / "sample_submission.csv")
         if limit:
             sample = sample[sample.id.isin(scenes.frame.id)]
@@ -243,6 +247,18 @@ def versions():
         except importlib.metadata.PackageNotFoundError:
             result[package] = "not installed under this distribution name"
     return result
+
+
+def write_diagnostics(scratch, output):
+    output.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        output / "diagnostics.zip", "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for folder in (scratch / "reports", scratch / "logs"):
+            for path in folder.glob("*"):
+                archive.write(path, path.relative_to(scratch).as_posix())
+        for path in scratch.glob("test_*.npz"):
+            archive.write(path, path.name)
 
 
 def run(
@@ -297,7 +313,6 @@ def run(
             OPENBLAS_NUM_THREADS="1",
             HF_HUB_OFFLINE="1",
             TRANSFORMERS_OFFLINE="1",
-            CUBLAS_WORKSPACE_CONFIG=":4096:8",
             FINAL_RUN="1",
         )
         command = [
@@ -383,12 +398,24 @@ def run(
                 stage, _ = active.pop(future)
                 try:
                     records.append(future.result())
-                except BaseException:
+                except BaseException as error:
                     cancelled.set()
                     with process_lock:
                         for process in processes:
                             if process.poll() is None:
                                 process.terminate()
+                    write_diagnostics(scratch, output)
+                    (output / "failure.json").write_text(
+                        json.dumps(
+                            dict(
+                                stage=stage,
+                                error=str(error),
+                                seconds=time.monotonic() - started,
+                                versions=versions(),
+                            )
+                        ),
+                        encoding="utf-8",
+                    )
                     raise
                 done.add(stage)
                 print(
@@ -420,6 +447,7 @@ def run(
         output.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(scratch / "final_submission.csv", output / "final_submission.csv")
         (output / "run.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        write_diagnostics(scratch, output)
     print(json.dumps(report), flush=True)
     return report
 

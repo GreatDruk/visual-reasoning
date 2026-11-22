@@ -57,6 +57,66 @@ def test_locked_graph_trains_new_branches_and_has_no_old_training_jobs():
     assert not {"teacher", "native", "thaw", "resnet", "pool"} & set(jobs)
     assert jobs["count54_421"] == ["convnext"]
     assert jobs["union421"] == ["unionprep"]
+    policy = load_config("configs/067_locked.yaml")["pipeline"]
+    assert policy["convnext"]["historical_warmup"]
+    assert policy["counter"]["historical_warmup"]
+
+
+def test_reference_loss_guard_fails_early_without_substituting_predictions():
+    from src.runtime import check_reference_loss
+
+    check_reference_loss("convnext", 1, 2.0699509765625, 2.0699509765625)
+    check_reference_loss("convnext", 2, 999, 2.0699509765625)
+    with pytest.raises(RuntimeError, match="first training epoch differs"):
+        check_reference_loss("convnext", 1, 2.00853, 2.0699509765625)
+
+
+def test_diagnostics_preserve_stage_evidence_without_packaging_model_weights(tmp_path):
+    import zipfile
+
+    from src.final import write_diagnostics
+
+    scratch = tmp_path / "scratch"
+    for folder in ["reports", "logs"]:
+        (scratch / folder).mkdir(parents=True, exist_ok=True)
+    (scratch / "reports/stage.json").write_text("{}")
+    (scratch / "logs/stage.log").write_text("first epoch evidence")
+    (scratch / "test_visual.npz").write_bytes(b"component scores")
+    (scratch / "model.pt").write_bytes(b"not a diagnostic export")
+    write_diagnostics(scratch, tmp_path / "out")
+    with zipfile.ZipFile(tmp_path / "out/diagnostics.zip") as archive:
+        assert set(archive.namelist()) == {
+            "reports/stage.json",
+            "logs/stage.log",
+            "test_visual.npz",
+        }
+
+
+def test_counter_image_path_uses_one_autocast_context(monkeypatch):
+    from contextlib import contextmanager
+
+    from src import counter
+
+    events = []
+
+    @contextmanager
+    def recorded(device):
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    class Net(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.head = torch.nn.Conv2d(64, 20, 1)
+
+        def pyramid(self, image):
+            assert events == ["enter"]
+            return [torch.zeros(len(image), 64, 4, 6)]
+
+    monkeypatch.setattr(counter, "amp", recorded)
+    counter.DenseCounter(Net())(torch.zeros(1, 3, 16, 24))
+    assert events == ["enter", "exit"]
 
 
 def test_pretrained_registry_rejects_task_checkpoint_even_when_checksummed(tmp_path):
