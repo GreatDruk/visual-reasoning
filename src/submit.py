@@ -31,6 +31,23 @@ from .runtime import Progress, amp, immutable_inputs, load_state, setup
 from .union import UnionHead, detector_rows, merge, rescue_tables, undo_shift
 
 
+def counter_dependencies(configs):
+    roles = set()
+    for cfg in configs:
+        settings = cfg["blend"]
+        if settings["counter_weight"]:
+            roles.update(("count54_421", "count54_853"))
+        if settings["swap"]:
+            source = settings.get("swap_source", "count53")
+            roles.update((source + "_421", source + "_853"))
+    return sorted(roles)
+
+
+def component_path(work, split, job, counter_roles):
+    suffix = "_" + "_".join(sorted(counter_roles)) if job == "count" else ""
+    return work / f"{split}_{job}{suffix}.npz"
+
+
 def restore_rows(rows, shifted, flipped):
     rows = rows.clone()
     if flipped:
@@ -146,28 +163,32 @@ def visual(scenes, inputs, root, manifest, device, project):
 
 
 @torch.inference_mode()
-def counters(scenes, root, manifest, device):
+def counters(scenes, root, manifest, device, roles=None):
     queries = CountQueries(scenes, device)
     result = {}
-    for number in (53, 54):
-        for seed in (421, 853):
-            role = f"count{number}_{seed}"
-            checkpoint = load_state(root / manifest["assets"][role])
-            model = DenseCounter(Detector(checkpoint["source_model"]), number == 53)
-            model.load_state_dict(checkpoint["model"], strict=True)
-            model = model.to(device, memory_format=torch.channels_last).eval()
-            histograms = []
-            batch = 96 if device.type == "cuda" else 2
-            progress = Progress(scenes.split + "/" + role, len(scenes.names), device)
-            for first in range(0, len(scenes.names), batch):
-                images = scenes.images(
-                    np.arange(first, min(first + batch, len(scenes.names))), device
-                )
-                histograms.append(model(images)[0])
-                progress.update(first + len(images), batch=batch)
-            hist = torch.cat(histograms)
-            result[role] = queries.score(hist)[0]
-            del model, checkpoint, histograms, hist
+    roles = (
+        set(roles) if roles is not None else {f"count{n}_{s}" for n in (53, 54) for s in (421, 853)}
+    )
+    for role in sorted(roles):
+        if role not in manifest.get("assets", {}):
+            raise ValueError(f"Counter checkpoint role is not registered: {role}")
+        checkpoint = load_state(root / manifest["assets"][role])
+        model = DenseCounter(
+            Detector(checkpoint["source_model"]),
+            checkpoint["config"]["count"]["density"] == "joint",
+        )
+        model.load_state_dict(checkpoint["model"], strict=True)
+        model = model.to(device, memory_format=torch.channels_last).eval()
+        histograms = []
+        batch = 96 if device.type == "cuda" else 2
+        progress = Progress(scenes.split + "/" + role, len(scenes.names), device)
+        for first in range(0, len(scenes.names), batch):
+            images = scenes.images(np.arange(first, min(first + batch, len(scenes.names))), device)
+            histograms.append(model(images)[0])
+            progress.update(first + len(images), batch=batch)
+        hist = torch.cat(histograms)
+        result[role] = queries.score(hist)[0]
+        del model, checkpoint, histograms, hist
     return result
 
 
@@ -178,18 +199,28 @@ def write_npz(path, **values):
     pending.replace(path)
 
 
-def worker(project, data, inputs, foundations, work, split, job, limit=None):
+def worker(project, data, inputs, foundations, work, split, job, limit=None, counter_roles=None):
     _, device = setup(421)
     root, manifest = read_bundle(foundations, verify=False)
     scenes = Scenes(data, split, limit)
     scenes.prepare_images(work / "images", device)
     started = time.monotonic()
+    counter_roles = counter_roles.split(",") if counter_roles else []
+    allowed = {
+        k
+        for k in manifest.get("assets", {})
+        if k.startswith("count") and k.endswith(("_421", "_853"))
+    }
+    if not set(counter_roles) <= allowed:
+        raise ValueError("Unknown counter dependency")
     values = (
         visual(scenes, inputs, root, manifest, device, project)
         if job == "visual"
-        else counters(scenes, root, manifest, device)
+        else counters(scenes, root, manifest, device, counter_roles)
     )
-    write_npz(work / f"{split}_{job}.npz", ids=scenes.frame.id.to_numpy(), **values)
+    write_npz(
+        component_path(work, split, job, counter_roles), ids=scenes.frame.id.to_numpy(), **values
+    )
     print(json.dumps(dict(job=job, split=split, seconds=time.monotonic() - started)), flush=True)
 
 
@@ -224,10 +255,21 @@ def run(
         raise ValueError("Submission work must be scratch")
     root, manifest = read_bundle(foundations)
     inputs, input_manifest = immutable_inputs(inputs)
+    configs = [load_config(project / "configs" / (name + ".yaml")) for name in selected]
+    if not configs or any(c["family"] != "submission" for c in configs):
+        raise ValueError("Select submission configurations")
+    counter_roles = counter_dependencies(configs)
+    missing = set(counter_roles) - manifest.get("assets", {}).keys()
+    if missing:
+        raise ValueError(
+            f"Attach the required counter assets or use frozen replay: {sorted(missing)}"
+        )
     train, val = Scenes(data, "train"), Scenes(data, "val")
     check_splits(manifest, train, val)
     provenance = json.loads((root / manifest["assets"]["deployment"]).read_text(encoding="utf8"))
     for role, item in provenance["checkpoints"].items():
+        if role not in {"union421", "union853", *counter_roles}:
+            continue
         if set(item["fit_scene_names"]) != set(train.names) or set(item["fit_scene_names"]) & set(
             val.names
         ):
@@ -241,9 +283,6 @@ def run(
             raise ValueError("Background must be estimated from train")
         background = z["background"].copy()
     prior = placement_prior(root / manifest["assets"]["donors"], background)
-    configs = [load_config(project / "configs" / (name + ".yaml")) for name in selected]
-    if not configs or any(c["family"] != "submission" for c in configs):
-        raise ValueError("Select submission configurations")
     digest = hashlib.sha256(
         json.dumps(
             dict(
@@ -274,7 +313,7 @@ def run(
         scenes._rgb = None
 
         def launch(job, gpu):
-            dest = work / f"{split}_{job}.npz"
+            dest = component_path(work, split, job, counter_roles)
             if dest.exists():
                 return
             env = dict(
@@ -299,6 +338,8 @@ def run(
                 str(work),
                 "--split",
                 split,
+                "--counter-roles",
+                ",".join(counter_roles),
             ]
             if limit:
                 command += ["--limit", str(limit)]
@@ -330,7 +371,7 @@ def run(
             "sigft": aligned_score(root, manifest["assets"][f"sigft_{split}"], scenes.frame),
         }
         for job in ("visual", "count"):
-            with np.load(work / f"{split}_{job}.npz") as z:
+            with np.load(component_path(work, split, job, counter_roles)) as z:
                 if not np.array_equal(z["ids"], scenes.frame.id):
                     raise ValueError("Submission component IDs differ")
                 parts.update({k: z[k].copy() for k in z.files if k != "ids"})
@@ -375,4 +416,5 @@ if __name__ == "__main__":
     parser.add_argument("--job", choices=("visual", "count"), required=True)
     parser.add_argument("--split", choices=("val", "test"), required=True)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--counter-roles")
     worker(**vars(parser.parse_args()))
