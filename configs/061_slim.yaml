@@ -1,0 +1,5 @@
+parent: 057_quality
+hypothesis: Keep 057 fixed and reuse the two 054 experts for guarded orientation;
+  remove the separate 053 counting networks.
+blend:
+  swap_source: count54

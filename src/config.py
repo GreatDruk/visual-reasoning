@@ -39,8 +39,18 @@ def load_config(path, stack=()):
         if set(result) != required:
             raise ValueError("Unexpected submission configuration fields")
         blend = result["blend"]
-        if set(blend) != {"base", "counter_weight", "tta_weight", "hidden_weight", "swap"}:
+        blend.setdefault("swap_source", "count53")
+        if set(blend) != {
+            "base",
+            "counter_weight",
+            "tta_weight",
+            "hidden_weight",
+            "swap",
+            "swap_source",
+        }:
             raise ValueError("Unexpected submission blend settings")
+        if blend["swap_source"] not in ("count53", "count54"):
+            raise ValueError("Unknown count agreement source")
         if blend["base"] not in ("compact", "quality") or not isinstance(blend["swap"], bool):
             raise ValueError("Invalid submission base or swap")
         if any(not 0 <= blend[k] <= 1 for k in ("counter_weight", "tta_weight", "hidden_weight")):
@@ -123,6 +133,8 @@ def load_config(path, stack=()):
             raise ValueError("Invalid extraction source or batch")
     if result["family"] == "count":
         c = result.get("count", {})
+        c.setdefault("local_weight", 0.0)
+        c.setdefault("export_test", False)
         expected = {
             "source",
             "density",
@@ -133,6 +145,8 @@ def load_config(path, stack=()):
             "pair_weight",
             "weight",
             "primary",
+            "local_weight",
+            "export_test",
         }
         if set(c) != expected:
             raise ValueError(f"Unexpected or missing count fields: {set(c) ^ expected}")
@@ -142,6 +156,10 @@ def load_config(path, stack=()):
             raise ValueError("Invalid counterfactual sampling policy")
         if not 0 < c["weight"] < 1 or min(c["absolute_weight"], c["pair_weight"]) < 0:
             raise ValueError("Invalid count loss or blend weight")
+        if c["local_weight"] < 0 or not isinstance(c["export_test"], bool):
+            raise ValueError("Invalid local count loss or test export")
+        if c["local_weight"] and (not c["paired"] or c["density"] != "factorized"):
+            raise ValueError("Local delta currently requires paired factorized density")
     return result
 
 

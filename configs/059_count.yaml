@@ -1,0 +1,6 @@
+parent: 054_count
+hypothesis: Joint size-color-material-shape density on the winning ConvNeXt source;
+  only replace factorization with the zero-initialized correction tested on R50 in 053.
+count:
+  density: joint
+  export_test: true

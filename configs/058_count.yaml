@@ -1,0 +1,9 @@
+parent: 054_count
+hypothesis: Localize the inserted class count increment inside its known train donor box;
+  preserve target-class density outside it. Same two images and inference model as 054.
+count:
+  local_weight: 0.28
+  export_test: true
+sources:
+- https://arxiv.org/abs/2511.12702
+- https://arxiv.org/abs/2012.07177

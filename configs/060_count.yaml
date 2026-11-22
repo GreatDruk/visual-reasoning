@@ -1,0 +1,6 @@
+parent: 054_count
+hypothesis: Matched ConvNeXt control without paired insertion; test its value and
+  whether half the training image forwards can be removed from the final chain.
+count:
+  paired: false
+  export_test: true
