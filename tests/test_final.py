@@ -40,6 +40,25 @@ def test_final_recipe_keeps_057_and_complete_training_budgets():
     assert load_config("configs/057_quality.yaml")["blend"]["tta_weight"] == 0.1
 
 
+def test_locked_graph_trains_new_branches_and_has_no_old_training_jobs():
+    from src.locked import graph as locked_graph
+
+    jobs, order = locked_graph()
+    assert set(order) == set(jobs)
+    assert {
+        "convnext",
+        "union421",
+        "union853",
+        "count53_421",
+        "count53_853",
+        "count54_421",
+        "count54_853",
+    } <= set(jobs)
+    assert not {"teacher", "native", "thaw", "resnet", "pool"} & set(jobs)
+    assert jobs["count54_421"] == ["convnext"]
+    assert jobs["union421"] == ["unionprep"]
+
+
 def test_pretrained_registry_rejects_task_checkpoint_even_when_checksummed(tmp_path):
     root = tmp_path / "assets"
     root.mkdir()

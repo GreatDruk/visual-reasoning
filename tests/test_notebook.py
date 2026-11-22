@@ -14,17 +14,17 @@ def files():
     content = {
         "src/__init__.py": b"",
         "configs/057_quality.yaml": b"family: submission",
-        "pretrained/pretrained.json": b"{}",
+        "inputs/manifest.json": b"{}",
     }
     spec = {
         "version": 1,
-        "code": {
+        "files": {
             k: hashlib.sha256(v).hexdigest()
             for k, v in content.items()
             if k.startswith(("src/", "configs/"))
         },
     }
-    return {**content, "final.json": json.dumps(spec).encode()}
+    return {**content, "snapshot057.json": json.dumps(spec).encode()}
 
 
 @pytest.fixture
@@ -71,7 +71,7 @@ def test_unpacked_final_bundle_is_used_in_place(bootstrap):
 
 def test_zip_fallback(bootstrap):
     inputs, working, _, run = bootstrap
-    with zipfile.ZipFile(inputs / "final.zip", "w") as z:
+    with zipfile.ZipFile(inputs / "057.zip", "w") as z:
         for name, content in files().items():
             z.writestr(name, content)
     assert run()["project"] == working / "project"
@@ -95,7 +95,7 @@ def test_ambiguous_bundles_rejected(bootstrap):
 
 def test_zip_traversal_rejected(bootstrap):
     inputs, working, _, run = bootstrap
-    with zipfile.ZipFile(inputs / "final.zip", "w") as z:
+    with zipfile.ZipFile(inputs / "057.zip", "w") as z:
         z.writestr("../escape.py", b"bad")
     with pytest.raises(AssertionError, match="Unsafe archive"):
         run()
