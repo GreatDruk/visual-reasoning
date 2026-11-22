@@ -235,3 +235,28 @@ def test_returning_placement_boxes_preserves_sampling_and_rejected_boxes(counter
     accepted = second[2].sum(1).bool()
     assert (second[4][accepted, 2:] > 0).all()
     assert not second[4][~accepted].any()
+
+
+@pytest.mark.parametrize("scale", [1, 2])
+def test_frozen_feature_training_never_calls_or_updates_the_encoder(counter_data, scale):
+    from src.feature_bank import FrozenFeatures
+
+    scenes, _, _ = counter_data
+    model = DenseCounter(TinyDetector(), scale=scale)
+    model.net.requires_grad_(False)
+    model.net.head.requires_grad_(True)
+    old = model.net.features[0].weight.detach().clone()
+    bank = FrozenFeatures(model, scenes, torch.device("cpu"))
+    assert bank.features.shape == (4, 64, 40 * scale, 60 * scale)
+    assert not bank.features.is_inference()
+    cfg = load_config(f"configs/{63 + scale:03d}_detail.yaml")
+
+    def forbidden(_):
+        raise AssertionError("CNN executed during cached readout training")
+
+    model.net.pyramid = forbidden
+    report = train(
+        cfg, model, bank, CountQueries(scenes, torch.device("cpu")), torch.device("cpu"), steps=1
+    )
+    assert report["updates"] == 1
+    torch.testing.assert_close(old, model.net.features[0].weight, rtol=0, atol=0)
