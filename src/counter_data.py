@@ -106,7 +106,7 @@ class CounterData:
         self.grid = torch.stack((x, y), -1).float() + 0.5
 
     @torch.no_grad()
-    def pair(self, indices, difficulty="mixed", attempts=1):
+    def pair(self, indices, difficulty="mixed", attempts=1, return_boxes=False):
         image = self.rgb[indices].float() / 255
         n = len(indices)
         device = image.device
@@ -116,6 +116,7 @@ class CounterData:
         kind = torch.zeros(n, dtype=torch.long, device=device)
         ratios = image.new_zeros(n)
         pixels = image.new_zeros(n)
+        boxes = image.new_zeros(n, 4) if return_boxes else None
         for _ in range(attempts):
             front = (torch.rand(n, self.keep.shape[1], device=device) * self.keep[indices]).argmax(
                 1
@@ -158,8 +159,12 @@ class CounterData:
             after = after + (patch - image) * visible[:, None]
             sz, col, joint = self.labels[d, k].T
             kind = torch.where(ok, (sz * 8 + col) * 6 + joint, kind)
+            if return_boxes:
+                placement = torch.cat((origin, extent), -1) / image.new_tensor([240, 160, 240, 160])
+                boxes = torch.where(ok[:, None], placement, boxes)
             ratios += fraction * ok
             pixels += count * ok
             done |= ok
         target = F.one_hot(kind, 96).float() * done[:, None]
-        return image, after, target, torch.stack((done.sum(), ratios.sum(), pixels.sum())).float()
+        result = image, after, target, torch.stack((done.sum(), ratios.sum(), pixels.sum())).float()
+        return (*result, boxes) if return_boxes else result
