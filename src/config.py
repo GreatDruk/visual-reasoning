@@ -149,6 +149,8 @@ def load_config(path, stack=()):
         c = result.get("count", {})
         c.setdefault("local_weight", 0.0)
         c.setdefault("export_test", False)
+        c.setdefault("initial", None)
+        c.setdefault("frozen_scale", 0)
         expected = {
             "source",
             "density",
@@ -161,6 +163,8 @@ def load_config(path, stack=()):
             "primary",
             "local_weight",
             "export_test",
+            "initial",
+            "frozen_scale",
         }
         if set(c) != expected:
             raise ValueError(f"Unexpected or missing count fields: {set(c) ^ expected}")
@@ -174,6 +178,10 @@ def load_config(path, stack=()):
             raise ValueError("Invalid local count loss or test export")
         if c["local_weight"] and (not c["paired"] or c["density"] != "factorized"):
             raise ValueError("Local delta currently requires paired factorized density")
+        if c["frozen_scale"] not in (0, 1, 2):
+            raise ValueError("Frozen feature scale must be zero, one or two")
+        if c["frozen_scale"] and (c["paired"] or not c["initial"]):
+            raise ValueError("Frozen readout requires an initial counter and no RGB augmentation")
     return result
 
 

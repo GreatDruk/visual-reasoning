@@ -1,0 +1,5 @@
+parent: 064_detail
+hypothesis: Change only the input from 160x240 to 320x480 and its FPN from 40x60 to
+  80x120; frozen source and the refitted counting heads match 064.
+count:
+  frozen_scale: 2

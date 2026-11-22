@@ -1,0 +1,9 @@
+parent: 060_count
+hypothesis: Native-resolution frozen-feature control for the detail-resolution study.
+  Warm start from 060/421, freeze its CNN/FPN, refit only the existing readout and mass head.
+count:
+  initial: count60_421
+  frozen_scale: 1
+  export_test: false
+sources:
+- https://arxiv.org/abs/1906.06423

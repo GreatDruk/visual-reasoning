@@ -15,9 +15,10 @@ ACTIVE = ("counting", "comparison")
 
 
 class DenseCounter(nn.Module):
-    def __init__(self, net, joint=False):
+    def __init__(self, net, joint=False, scale=1):
         super().__init__()
         self.net = net
+        self.scale = scale
         self.mass = nn.Sequential(nn.Conv2d(20, 32, 3, padding=1), nn.SiLU(), nn.Conv2d(32, 1, 1))
         nn.init.zeros_(self.mass[-1].weight)
         nn.init.zeros_(self.mass[-1].bias)
@@ -27,8 +28,19 @@ class DenseCounter(nn.Module):
             nn.init.zeros_(self.joint.bias)
 
     def forward(self, images, local_types=None):
+        features = self.extract(images)
+        return self.forward_features(features, local_types)
+
+    def extract(self, images):
+        if self.scale != 1:
+            images = F.interpolate(
+                images, scale_factor=self.scale, mode="bilinear", align_corners=False
+            )
         with amp(images.device):
-            features = self.net.pyramid(images)[0]
+            return self.net.pyramid(images)[0]
+
+    def forward_features(self, features, local_types=None):
+        with amp(features.device):
             raw = self.net.head(features)
             correction = self.mass(raw)
             joint = None if self.joint is None else self.joint(features)
