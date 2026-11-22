@@ -71,7 +71,7 @@ def execute(stage, project, data, assets, work, *, limit=None, steps=None):
 
     _, device = setup(421)
     p = load_config(Path(project) / "configs/067_locked.yaml")["pipeline"]
-    m = manifest(project, work)
+    m = manifest(project, work, historical_warmup=bool(p["convnext"].get("historical_warmup")))
     if stage == "convnext":
         return cold_train.convnext(
             project, data, work, device, p["convnext"], limit=limit, steps=steps
@@ -89,6 +89,7 @@ def execute(stage, project, data, assets, work, *, limit=None, steps=None):
             96,
             limit=limit,
             steps=steps,
+            historical_warmup=bool(p["counter"].get("historical_warmup")),
         )
     if stage.startswith("union"):
         cfg = load_config(Path(project) / "configs/045_union.yaml")
@@ -125,7 +126,15 @@ def execute(stage, project, data, assets, work, *, limit=None, steps=None):
             dict(config=cfg, head={k: v.cpu() for k, v in head.state_dict().items()}),
         )
         return report
-    return inference(stage, project, data, work, device, limit=limit)
+    return inference(
+        stage,
+        project,
+        data,
+        work,
+        device,
+        limit=limit,
+        historical_warmup=bool(p["convnext"].get("historical_warmup")),
+    )
 
 
 def run(project, data, work, output, *, started=None, limit=None, steps=None):

@@ -5,6 +5,8 @@ sources: []
 pipeline:
   submission: 057_quality
   cached: [r50_img, thaw, sigft, teacher, donors, background]
-  convnext: {config: 044_convnext, seed: 853, epochs: 21, batch: 64}
+  convnext: {config: 044_convnext, seed: 853, epochs: 21, batch: 64,
+    historical_warmup: true, first_epoch_loss: 2.0699509765625}
   union: {config: 045_union, seeds: [421, 853], epochs: 12, batch: 96}
-  counter: {configs: [053_count, 054_count], seeds: [421, 853], epochs: 18, batch: 96}
+  counter: {configs: [053_count, 054_count], seeds: [421, 853], epochs: 18, batch: 96,
+    historical_warmup: true}

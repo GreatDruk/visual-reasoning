@@ -121,7 +121,7 @@ def local_delta_loss(delta, boxes, accepted):
     return (error * accepted).sum() / accepted.sum().clamp_min(1)
 
 
-def train(cfg, model, data, queries, device, steps=None, fixed_batch=None):
+def train(cfg, model, data, queries, device, steps=None, fixed_batch=None, historical_warmup=False):
     freeze_statistics(model)
     extra = [p for name, p in model.named_parameters() if not name.startswith("net.")]
     optim = torch.optim.AdamW(
@@ -142,13 +142,15 @@ def train(cfg, model, data, queries, device, steps=None, fixed_batch=None):
         finally:
             optim.zero_grad(set_to_none=True)
 
-    if fixed_batch is not None:
+    if fixed_batch is not None and not historical_warmup:
         batch, profile = fixed_batch, []
     else:
         with torch.random.fork_rng(devices=[device.index or 0] if device.type == "cuda" else []):
             batch, profile = profile_batches(
                 device, tuple(b for b in (24, 48, effective) if effective % b == 0), n, probe
             )
+        if fixed_batch is not None:
+            batch = fixed_batch
     if effective % batch:
         batch = 1
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, cfg["train"]["epochs"])

@@ -122,7 +122,17 @@ def resnet_loss(cfg, head, outputs, det_outputs, packed, targets, stage, shape):
     return loss
 
 
-def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
+def train_resnet(
+    cfg,
+    scenes,
+    teacher,
+    inputs,
+    device,
+    rng,
+    step_limit=None,
+    fixed_batch=None,
+    expected_first_epoch_loss=None,
+):
     weight_name = "resnet50" if cfg["model"]["backbone"] == "resnet" else "convnext"
     model = Detector(cfg["model"], inputs / "pretrained" / f"{weight_name}.pth").to(
         device, memory_format=torch.channels_last
@@ -187,6 +197,8 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
                 t.copy_(saved_buffers[name])
         torch.set_rng_state(cpu_rng)
         torch.cuda.set_rng_state(gpu_rng, device)
+    if fixed_batch is not None:
+        batch = fixed_batch if device.type == "cuda" else min(2, fixed_batch)
     effective = (
         cfg["train"]["effective_batch"] if device.type == "cuda" and not step_limit else batch
     )
@@ -287,6 +299,9 @@ def train_resnet(cfg, scenes, teacher, inputs, device, rng, step_limit=None):
                 epoch=epoch + 1, stage=stage, loss=float(loss_sum.cpu()) / max(seen, 1), scenes=seen
             )
         )
+        from .runtime import check_reference_loss
+
+        check_reference_loss("convnext", epoch + 1, history[-1]["loss"], expected_first_epoch_loss)
         progress.update(
             seen, force=True, loss=history[-1]["loss"], batch=batch, amp_skips=overflows
         )

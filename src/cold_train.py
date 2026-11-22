@@ -212,14 +212,25 @@ def native_head(data, work, device, recipe, *, limit=None, steps=None):
 def convnext(project, data, work, device, recipe, *, limit=None, steps=None):
     cfg = load_config(Path(project) / "configs" / f"{recipe['config']}.yaml")
     cfg["train"].update(
-        seed=recipe["seed"], epochs=recipe["epochs"], batch=recipe["batch"], calibrate=False
+        seed=recipe["seed"],
+        epochs=recipe["epochs"],
+        batch=128 if recipe.get("historical_warmup") else recipe["batch"],
+        calibrate=bool(recipe.get("historical_warmup")),
     )
     scenes = Scenes(data, "train", limit)
     scenes.prepare_images(Path(work) / "images", device)
     teacher = Teacher(Path(work) / "inputs/teacher/train.npz", scenes)
     rng, _ = setup(recipe["seed"])
     model, head, report = train_resnet(
-        cfg, scenes, teacher, Path(work) / "inputs", device, rng, steps
+        cfg,
+        scenes,
+        teacher,
+        Path(work) / "inputs",
+        device,
+        rng,
+        steps,
+        fixed_batch=recipe["batch"] if recipe.get("historical_warmup") else None,
+        expected_first_epoch_loss=recipe.get("first_epoch_loss") if limit is None else None,
     )
     save(
         Path(work) / "convnext.pt",
@@ -296,7 +307,20 @@ def union(project, data, work, manifest, device, recipe, seed, *, limit=None, st
     return report
 
 
-def counter(project, data, work, manifest, device, config, seed, batch, *, limit=None, steps=None):
+def counter(
+    project,
+    data,
+    work,
+    manifest,
+    device,
+    config,
+    seed,
+    batch,
+    *,
+    limit=None,
+    steps=None,
+    historical_warmup=False,
+):
     from .count_run import make_counter, train
     from .counter import CountQueries
     from .counter_data import CounterData
@@ -315,6 +339,7 @@ def counter(project, data, work, manifest, device, config, seed, batch, *, limit
         device,
         steps,
         fixed_batch=batch if device.type == "cuda" else 2,
+        historical_warmup=historical_warmup,
     )
     role = f"count{53 if config == '053_count' else 54}_{seed}"
     save(
