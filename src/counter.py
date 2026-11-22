@@ -28,8 +28,24 @@ class DenseCounter(nn.Module):
             nn.init.zeros_(self.joint.bias)
 
     def forward(self, images, local_types=None):
-        features = self.extract(images)
-        return self.forward_features(features, local_types)
+        # Keep the original 051-054 autocast scope for fresh training.
+        if self.scale != 1:
+            images = F.interpolate(
+                images, scale_factor=self.scale, mode="bilinear", align_corners=False
+            )
+        with amp(images.device):
+            features = self.net.pyramid(images)[0]
+            raw = self.net.head(features)
+            correction = self.mass(raw)
+            joint = None if self.joint is None else self.joint(features)
+        hist, mass = self.integrate(
+            raw.float(), correction.float(), None if joint is None else joint.float()
+        )
+        if local_types is None:
+            return hist, mass
+        if joint is not None:
+            raise ValueError("Localized delta requires factorized density")
+        return hist, mass, self.class_density(raw.float(), mass, local_types)
 
     def extract(self, images):
         if self.scale != 1:

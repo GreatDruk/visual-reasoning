@@ -24,6 +24,18 @@ def zero_loss(tensor):
     return tensor.sum(dtype=torch.float32) * 0.0
 
 
+def check_reference_loss(stage, epoch, actual, expected, tolerance=1e-5):
+    """Stop a reproduction at the first epoch if its numerical trace differs."""
+    if epoch != 1 or expected is None:
+        return
+    if not np.isfinite(actual) or abs(actual - expected) > tolerance:
+        raise RuntimeError(
+            f"{stage}: first training epoch differs from the original: "
+            f"{actual:.12g} versus {expected:.12g}. "
+            "Stopped before further training; original 057 remains the reference."
+        )
+
+
 class Progress:
     """Low-frequency stage telemetry, relayed by the notebook process."""
 
@@ -98,7 +110,7 @@ def setup(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.set_num_threads(1 if os.environ.get("FINAL_RUN") == "1" else 2)
+    torch.set_num_threads(2)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     return np.random.default_rng(seed), torch.device(
