@@ -36,7 +36,12 @@ def counter_dependencies(configs):
     for cfg in configs:
         settings = cfg["blend"]
         if settings["counter_weight"]:
-            roles.update(("count54_421", "count54_853"))
+            roles.update(
+                (
+                    settings.get("count_primary", "count54_421"),
+                    settings.get("count_secondary", "count54_853"),
+                )
+            )
         if settings["swap"]:
             source = settings.get("swap_source", "count53")
             roles.update((source + "_421", source + "_853"))
