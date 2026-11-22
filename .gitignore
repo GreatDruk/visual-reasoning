@@ -12,6 +12,7 @@ catboost_info
 .DS_Store
 submissions/
 /final_submission.csv
+/moodle/
 /resources/torch/
 .mimocode/
 /.claude/worktrees/

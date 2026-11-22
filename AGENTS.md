@@ -1,5 +1,7 @@
 # Repository conventions
 
+Final architecture is 057. The single notebook now runs cold-start orchestration066, using only original ImageNet/SigLIP input weights. Rebuild all train-derived teachers, donors, representations and models in scratch; no validation or profiling. Moodle deliverables live in ignored moodle/. Full T4 runtime and fresh public quality remain pending the user's run. Keep historical 057 as reference until that result arrives.
+
 Public control remains 057_quality (.99978). 061–065 are not recommended for further submissions or automatic repeats. Completed 064/065 frozen-feature resolution study did not improve 057: native refit introduces one pair error, doubled input three; doubled input count MAE is .22156 versus .04368 native. Local improvement on one hidden yellow-cylinder example is insufficient for deployment. Preserve 057 and all L1/L2 anchors. Frozen evaluation scores never enter fitting. Read KaggleTemplate.md and selected YAML before changes. Test is inference/pairing only; final fresh train-to-test 50-minute execution is still unverified.
 
 - Keep one notebook, `notebooks/base.ipynb`. Put reusable logic in `src`, finished-code checks in `tests`. Do not add experiment-specific scripts or notebook code generators to the maintained tree.

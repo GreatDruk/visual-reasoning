@@ -6,7 +6,8 @@ requires-python = ">=3.11,<3.15"
 dependencies = [
     "torch>=2.5,<3", "torchvision>=0.20,<1", "transformers>=4.49,<6",
     "safetensors>=0.5,<1", "numpy>=1.26,<3", "pandas>=2.2,<4",
-    "scipy>=1.13,<2", "scikit-learn>=1.5,<2", "PyYAML>=6,<7", "Pillow>=10,<13", "filelock>=3.16,<5",
+    "scipy>=1.13,<2", "scikit-learn>=1.5,<2", "PyYAML>=6,<7", "Pillow>=10,<14", "filelock>=3.16,<5",
+    "opencv-python-headless>=4.10,<6",
 ]
 
 [project.optional-dependencies]

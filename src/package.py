@@ -9,6 +9,55 @@ from pathlib import Path
 from .runtime import immutable_inputs
 
 
+def build_final(project, inputs, output):
+    """Offline cold-start bundle: source plus original pretrained weights only."""
+    project, inputs, output = map(Path, (project, inputs, output))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sources = {
+        p.relative_to(project).as_posix(): p
+        for folder in ["src", "configs"]
+        for p in (project / folder).rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts
+    }
+    weights = {
+        name: inputs / "pretrained" / name
+        for name in [
+            "resnet50.pth",
+            "convnext.pth",
+            "siglip/config.json",
+            "siglip/model.safetensors",
+        ]
+    }
+    hashes = {}
+    for name, path in weights.items():
+        with path.open("rb") as f:
+            hashes[name] = hashlib.file_digest(f, "sha256").hexdigest()
+    pending = output.with_suffix(".tmp")
+    with zipfile.ZipFile(pending, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+        code = {}
+        for name, path in sorted(sources.items()):
+            content = path.read_bytes()
+            z.writestr(name, content)
+            code[name] = hashlib.sha256(content).hexdigest()
+        for name, path in weights.items():
+            z.write(path, "pretrained/" + name, compress_type=zipfile.ZIP_STORED)
+        z.writestr(
+            "pretrained/pretrained.json", json.dumps(dict(version=1, files=hashes), indent=2)
+        )
+        z.writestr(
+            "final.json",
+            json.dumps(dict(version=1, architecture="057_quality", code=code), indent=2),
+        )
+    with zipfile.ZipFile(pending) as z:
+        if z.testzip():
+            raise ValueError("Final archive CRC failed")
+    pending.replace(output)
+    print(
+        f"{output}: {output.stat().st_size / 2**20:.2f} MiB; original pretrained weights only",
+        flush=True,
+    )
+
+
 def build(
     project, inputs, output, code_only=False, foundation_runs=None, assets=None, anchors=None
 ):
@@ -122,6 +171,11 @@ def build(
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--project", type=Path, default=Path("."))
+    p.add_argument(
+        "--final",
+        action="store_true",
+        help="Build cold-start 057 with original pretrained weights only",
+    )
     p.add_argument("--inputs", type=Path, default=Path("inputs"))
     p.add_argument("--output", type=Path, default=Path("artefacts/kaggle/base.zip"))
     p.add_argument(
@@ -140,6 +194,9 @@ if __name__ == "__main__":
     p.add_argument("--anchor", action="append", default=[], metavar="ROLE=NPZ")
     a = p.parse_args()
     runs = dict(item.split("=", 1) for item in a.foundation)
+    if a.final:
+        build_final(a.project, a.inputs, a.output)
+        raise SystemExit(0)
     build(
         a.project,
         a.inputs,
