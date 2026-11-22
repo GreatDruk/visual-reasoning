@@ -9,19 +9,21 @@ Update the existing runtime private dataset with `artefacts/kaggle/study.zip`; r
 Defaults:
 
 ```python
-SELECTED = ["058_count", "059_count", "060_count"]
-SEEDS = None
-REPLAY = ["057_quality", "061_slim"]
+SELECTED = ["060_count"]
+SEEDS = [853]
+REPLAY = ["057_quality", "062_mixed", "063_consensus"]
 ```
 
-The quick replay first writes `057_quality.csv` and `061_slim.csv` under `/kaggle/working`, without image encoding or fitting. Set `SELECTED=[]` for only that replay. Existing 057 is reproduced from registered frozen components. Live 061 inference also skips both 053 checkpoint networks; a live 057 rerun needs the previous full deployment bundle, while its frozen replay remains available in this study bundle.
+The quick replay first writes `057_quality.csv`, `062_mixed.csv` and `063_consensus.csv` under `/kaggle/working`, without image encoding or fitting. Set `SELECTED=[]` for only that replay. 061 was slightly worse on public; 058/059 are complete without a useful improvement. Repeat only 060, then inspect its matched 054/853 control. Existing 057 is reproduced from registered frozen components. Live 061 inference also skips both 053 checkpoint networks; a live 057 rerun needs the previous full deployment bundle, while its frozen replay remains available in this study bundle.
 
 | Config | Single change from 054/057 |
 |---|---|
 | 058_count | Supervise the inserted class +1 inside its known donor box and zero outside |
 | 059_count | Joint class-density correction on ConvNeXt |
 | 060_count | Remove paired insertion and its second image forward |
-| 061_slim | Use the two 054 experts for guarded swapping; remove both 053 models |
+| 061_slim | Completed: slightly worse public; retain 057 |
+| 062_mixed | Replace only 054/421 with 060/421, keeping 054/853 |
+| 063_consensus | Require primary confirmation for the existing auxiliary swap |
 
 Training uses train only, fixed 18 epochs and effective batch 96, with common decoded RGB and foreground caches. Each completed count run saves `candidate.csv` inside `artefacts/results/<config>/<seed>/<timestamp>`. It replaces the count slot of 057 at weight .25, preserving the other branches. Test is used only for inference/export. Partial smoke runs do not export competition submissions.
 
