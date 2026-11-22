@@ -137,12 +137,24 @@ def compose(scenes, parts, settings):
         base += 0.25 * (u + parts["union853"]) / 2
     active = scenes.frame.category.isin(ACTIVE).to_numpy()
     weight = settings["counter_weight"]
-    count = (parts["count54_421"] + parts["count54_853"]) / 2
-    counted = np.where(active, (1 - weight) * base + weight * count, base)
+    if weight:
+        count = (parts["count54_421"] + parts["count54_853"]) / 2
+        counted = np.where(active, (1 - weight) * base + weight * count, base)
+    else:
+        counted = base.copy()
     tta = counted + settings["tta_weight"] * (parts["r50_tta"] - parts["r50_plain"])
-    hidden = tta + settings["hidden_weight"] * (hidden_adjust(scenes, tta, parts["hidden"]) - tta)
+    hidden = (
+        tta + settings["hidden_weight"] * (hidden_adjust(scenes, tta, parts["hidden"]) - tta)
+        if settings["hidden_weight"]
+        else tta.copy()
+    )
     final, swapped = (
-        guarded_swap(scenes, hidden, parts["count53_421"], parts["count53_853"])
+        guarded_swap(
+            scenes,
+            hidden,
+            parts[settings.get("swap_source", "count53") + "_421"],
+            parts[settings.get("swap_source", "count53") + "_853"],
+        )
         if settings["swap"]
         else (hidden, 0)
     )
