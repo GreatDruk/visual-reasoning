@@ -111,7 +111,7 @@ def hidden_adjust(scenes, base, histograms):
     return score
 
 
-def guarded_swap(scenes, base, first, second):
+def guarded_swap(scenes, base, first, second, primary=None):
     """Historical .85 agreement/1.0 uncertainty gate; preserve all score values."""
     a, b = scenes.pairs.T
     eligible = (
@@ -120,6 +120,8 @@ def guarded_swap(scenes, base, first, second):
         & (first * second > 0)
         & (np.minimum(np.abs(first), np.abs(second)) >= logit(0.85))
     )
+    if primary is not None:
+        eligible &= first * primary > 0
     proposed = 0.75 * base + 0.25 * (first + second) / 2
     flip = eligible[a] & eligible[b] & ((base[a] - base[b]) * (proposed[a] - proposed[b]) < 0)
     result = base.copy()
@@ -138,7 +140,10 @@ def compose(scenes, parts, settings):
     active = scenes.frame.category.isin(ACTIVE).to_numpy()
     weight = settings["counter_weight"]
     if weight:
-        count = (parts["count54_421"] + parts["count54_853"]) / 2
+        count = (
+            parts[settings.get("count_primary", "count54_421")]
+            + parts[settings.get("count_secondary", "count54_853")]
+        ) / 2
         counted = np.where(active, (1 - weight) * base + weight * count, base)
     else:
         counted = base.copy()
@@ -154,6 +159,7 @@ def compose(scenes, parts, settings):
             hidden,
             parts[settings.get("swap_source", "count53") + "_421"],
             parts[settings.get("swap_source", "count53") + "_853"],
+            primary=count if settings.get("confirm_primary", False) else None,
         )
         if settings["swap"]
         else (hidden, 0)
