@@ -181,6 +181,7 @@ def counters(scenes, root, manifest, device, roles=None):
         model = DenseCounter(
             Detector(checkpoint["source_model"]),
             checkpoint["config"]["count"]["density"] == "joint",
+            scale=checkpoint["config"]["count"].get("frozen_scale", 0) or 1,
         )
         model.load_state_dict(checkpoint["model"], strict=True)
         model = model.to(device, memory_format=torch.channels_last).eval()

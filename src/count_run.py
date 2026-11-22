@@ -33,6 +33,17 @@ from .runtime import (
 
 
 def make_counter(cfg, inputs, root, manifest, device):
+    initial = cfg["count"].get("initial")
+    if initial:
+        if initial not in manifest.get("assets", {}):
+            raise ValueError("Attach the registered initial counter")
+        checkpoint = load_state(root / manifest["assets"][initial])
+        net = Detector(checkpoint["source_model"])
+        model = DenseCounter(
+            net, cfg["count"]["density"] == "joint", scale=cfg["count"]["frozen_scale"] or 1
+        )
+        model.load_state_dict(checkpoint["model"], strict=True)
+        return model.to(device, memory_format=torch.channels_last)
     source = cfg["count"]["source"]
     if source == "historical":
         settings = cfg["model"]
@@ -77,9 +88,12 @@ def objective(model, data, queries, idx, cfg):
             .mean()
         )
     else:
-        original, _ = model(
-            (data.rgb[idx].float() / 255).contiguous(memory_format=torch.channels_last)
-        )
+        if hasattr(data, "features"):
+            original, _ = model.forward_features(data.features[idx])
+        else:
+            original, _ = model(
+                (data.rgb[idx].float() / 255).contiguous(memory_format=torch.channels_last)
+            )
         paired = zero_loss(original)
     factual, absolute = queries.loss(original, idx)
     return factual + c["absolute_weight"] * absolute + c["pair_weight"] * paired + c.get(
@@ -117,7 +131,7 @@ def train(cfg, model, data, queries, device, steps=None):
         ]
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda", init_scale=128.0)
-    n = len(data.rgb)
+    n = len(data.features) if hasattr(data, "features") else len(data.rgb)
     effective = cfg["train"]["effective_batch"]
 
     def probe(size):
@@ -263,6 +277,17 @@ def execute(
         raise ValueError("Unknown counter source")
     if cfg["count"].get("export_test") and "components_metadata" not in manifest.get("assets", {}):
         raise ValueError("Attach frozen 057 components for replacement evaluation and export")
+    initial = cfg["count"].get("initial")
+    if initial:
+        provenance = json.loads((root / manifest["assets"]["deployment"]).read_text())
+        item = provenance["checkpoints"][initial]
+        expected = set(pd.read_csv(Path(data) / "train.csv").image)
+        if set(item["fit_scene_names"]) != expected or expected & set(val.names):
+            raise ValueError("Initial counter must be trained on exactly train")
+        state = load_state(root / manifest["assets"][initial])
+        if state["config"] != item["config"]:
+            raise ValueError("Initial counter provenance/config mismatch")
+        del state
     started = time.monotonic()
     with Monitor(device) as monitor:
         prepared = time.monotonic()
@@ -283,6 +308,25 @@ def execute(
             return dict(preparation_seconds=preparation)
         setup(cfg["train"]["seed"])
         model = make_counter(cfg, inputs, root, manifest, device)
+        feature_report = None
+        if cfg["count"].get("frozen_scale"):
+            from .feature_bank import FrozenFeatures
+
+            model.net.requires_grad_(False)
+            model.net.head.requires_grad_(True)
+            feature_started = time.monotonic()
+            features = FrozenFeatures(model, train_scenes, device)
+            feature_report = dict(
+                seconds=time.monotonic() - feature_started,
+                shape=list(features.features.shape),
+                bytes=features.bytes,
+                scale=model.scale,
+                backbone_frozen=True,
+            )
+            del bank
+            bank = features
+            del features
+            train_scenes._rgb = None
         queries = CountQueries(train_scenes, device)
         training = train(cfg, model, bank, queries, device, steps)
         del bank, queries
@@ -315,6 +359,7 @@ def execute(
             foundations=manifest,
             fit_scene_names=train_scenes.names.tolist(),
             preparation_seconds=preparation,
+            frozen_features=feature_report,
             training=training,
             metrics=metrics(val.frame, candidate),
             reference_metrics=metrics(val.frame, baseline),
