@@ -41,7 +41,7 @@ def training_phases(policy, count, seed=7):
     )
 
 
-def train_head(cfg, scenes, store, inputs, device, steps=None):
+def train_head(cfg, scenes, store, inputs, device, steps=None, fixed_batch=None):
     seed = cfg["train"]["seed"]
     rng, _ = setup(seed)  # Cache misses must not change initialization or dropout RNG.
     teacher = load_state(inputs / "reference/scene_silhouette.pt")
@@ -62,8 +62,11 @@ def train_head(cfg, scenes, store, inputs, device, steps=None):
         finally:
             optim.zero_grad(set_to_none=True)
 
-    with torch.random.fork_rng(devices=[device.index or 0] if device.type == "cuda" else []):
-        batch, profile = profile_batches(device, (24, 48, effective), len(scenes.names), probe)
+    if fixed_batch is not None:
+        batch, profile = fixed_batch, []
+    else:
+        with torch.random.fork_rng(devices=[device.index or 0] if device.type == "cuda" else []):
+            batch, profile = profile_batches(device, (24, 48, effective), len(scenes.names), probe)
     started = time.monotonic()
     updates = 0
     history = []

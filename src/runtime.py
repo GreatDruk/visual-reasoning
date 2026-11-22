@@ -30,7 +30,7 @@ class Progress:
     def __init__(self, stage, total, device=None, interval=30):
         self.stage, self.total, self.device = stage, total, device
         self.started = self.last = time.monotonic()
-        self.interval = interval
+        self.interval = max(90, interval) if os.environ.get("FINAL_RUN") == "1" else interval
         self.update(0, force=True)
 
     def update(self, done, force=False, **values):
@@ -98,7 +98,7 @@ def setup(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.set_num_threads(2)
+    torch.set_num_threads(1 if os.environ.get("FINAL_RUN") == "1" else 2)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     return np.random.default_rng(seed), torch.device(
