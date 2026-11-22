@@ -1,5 +1,7 @@
 # Visual reasoning
 
+Current Kaggle entry point: `notebooks/base.ipynb` with `artefacts/kaggle/057.zip`, competition input, T4 ×2, Internet Off. It caches historical R50/thaw/sigft/teacher and retrains C044, U045 and counters053/054 before applying the fixed057 composition. The already-submitted `moodle/` folder is unchanged. Cold066 and full frozen inference are not the current notebook default.
+
 Public control: **057_quality — 0.99978**, reported by the team. The current study strengthens or simplifies its existing count branch. It does not add all alternatives to the final ensemble.
 
 ## Run the current study

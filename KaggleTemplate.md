@@ -1,5 +1,11 @@
 # Исследование основы ансамбля
 
+## Уточнённый окончательный запуск:067_locked
+
+Пользователь отменил полный cold066 и затем отклонил all-frozen inference: из кэша нужны только исторические R50/thaw/sigft/teacher, train donors и фон. Заново обучаются C04485321эпох, U045421/85312эпох, counters053/054421/85318эпох. Те же train-only assets, seed, effective/physical batches (C64/128, U/count96), losses и057 mixture/TTA/prior/swap. Для U используется оригинальный prepare_bank/TableStore, включая четыре фазы и исходный slot trimming; training phase остаётсяzero. Profiling отключён с фиксированными проверенными батчами. Worker scheduler переиспользуется, без реконструкции старогоnative/teacher/SigLIP и без val.
+
+Новый057.zip содержит исходники, исходный ConvNeXt ImageNet и только исторические trained inputs; C/U/counter trained checkpoints в него не входят. Поэтому скрытого fallback на готовые новые ветви нет. Все новые веса читаются только из свежего scratch текущего запуска. Notebook сравнивает regenerated CSV с исходной057 Version42; близость не объявляется доказанной до фактического повторного обучения. Moodle по просьбе пользователя больше не изменяется.
+
 ## Подготовлен полный холодный запуск057
 
 Единственный notebook переведён на fixed pipeline066: teacher19(schedule20)/seed42, native21/seed148, native head6/seed42, thaw10/seed42, historicalR5021/812, C04421/853(batch64/effective128), U04512×2, counters053/05418×2, sigft pooling4/head10/seed721 и train-only PCA732. Входной final.zip содержит только исходные ImageNet/SigLIP weights, текущий src/configs; pretrained registry отвергает task assets. Val не читается. Два постоянных worker процесса на двух GPU, dependency scheduler, неизменённая формула057, фиксированные батчи без profiling, минимальный console output; все промежуточные данные только scratch. Новое выполнение никогда не восстанавливается из старого scratch. Output — final_submission.csv и run.json с полным временем от начала notebook.
