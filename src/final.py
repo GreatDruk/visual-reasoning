@@ -245,7 +245,21 @@ def versions():
     return result
 
 
-def run(project, data, assets, work, output, *, limit=None, steps=None, started=None):
+def run(
+    project,
+    data,
+    assets,
+    work,
+    output,
+    *,
+    limit=None,
+    steps=None,
+    started=None,
+    runner="src.final",
+    configuration="066_final",
+    jobs=None,
+    prepare=None,
+):
     project, data, assets, work, output = [
         Path(x).resolve() for x in (project, data, assets, work, output)
     ]
@@ -260,8 +274,8 @@ def run(project, data, assets, work, output, *, limit=None, steps=None, started=
     logs = scratch / "logs"
     logs.mkdir()
     started = time.monotonic() if started is None else started
-    pretrained = prepare_inputs(assets, scratch)
-    dependencies, priority = graph()
+    pretrained = (prepare or prepare_inputs)(assets, scratch)
+    dependencies, priority = graph() if jobs is None else jobs
     pending = set(dependencies)
     done = set()
     active = {}
@@ -290,7 +304,7 @@ def run(project, data, assets, work, output, *, limit=None, steps=None, started=
             sys.executable,
             "-u",
             "-m",
-            "src.final",
+            runner,
             "--worker",
             "--project",
             str(project),
@@ -387,14 +401,19 @@ def run(project, data, assets, work, output, *, limit=None, steps=None, started=
     seconds = time.monotonic() - started
     report = dict(
         architecture="057_quality",
-        cold_start=True,
+        cold_start=runner == "src.final",
         smoke=bool(limit),
         seconds=seconds,
         within_50_minutes=seconds <= 3000,
         stages=records,
-        recipe=load_config(project / "configs/066_final.yaml")["pipeline"],
+        recipe=load_config(project / "configs" / (configuration + ".yaml"))["pipeline"],
         pretrained=pretrained,
-        training="official train only; no validation and no trained input assets",
+        training="official train only; no validation; "
+        + (
+            "original pretrained inputs"
+            if runner == "src.final"
+            else "frozen historical inputs; fresh ConvNeXt, union and count training"
+        ),
         versions=versions(),
     )
     if not limit:
@@ -405,7 +424,7 @@ def run(project, data, assets, work, output, *, limit=None, steps=None, started=
     return report
 
 
-if __name__ == "__main__":
+def worker_main(executor=execute):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ["project", "data", "assets", "work"]:
         parser.add_argument("--" + name, required=True)
@@ -419,7 +438,7 @@ if __name__ == "__main__":
 
     def perform(name):
         tick = time.monotonic()
-        result = execute(stage=name, **args)
+        result = executor(stage=name, **args)
         reports = Path(args["work"]) / "reports"
         reports.mkdir(exist_ok=True)
         (reports / (name + ".json")).write_text(
@@ -438,3 +457,7 @@ if __name__ == "__main__":
         if stage is None:
             parser.error("Select --worker or --stage")
         perform(stage)
+
+
+if __name__ == "__main__":
+    worker_main()

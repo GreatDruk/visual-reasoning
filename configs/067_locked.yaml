@@ -1,0 +1,10 @@
+family: pipeline
+hypothesis: Reuse only historical R50/thaw/sigft/teacher caches; retrain the newer
+  044, 045 and 053/054 branches with their original budgets for fixed 057 inference.
+sources: []
+pipeline:
+  submission: 057_quality
+  cached: [r50_img, thaw, sigft, teacher, donors, background]
+  convnext: {config: 044_convnext, seed: 853, epochs: 21, batch: 64}
+  union: {config: 045_union, seeds: [421, 853], epochs: 12, batch: 96}
+  counter: {configs: [053_count, 054_count], seeds: [421, 853], epochs: 18, batch: 96}

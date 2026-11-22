@@ -91,7 +91,17 @@ def load_sources(cfg, inputs, foundation_root, manifest, device):
 
 
 @torch.inference_mode()
-def prepare_bank(cfg, scenes, inputs, inputs_manifest, foundation_root, manifest, scratch, device):
+def prepare_bank(
+    cfg,
+    scenes,
+    inputs,
+    inputs_manifest,
+    foundation_root,
+    manifest,
+    scratch,
+    device,
+    fixed_batch=None,
+):
     root = Path(scratch).resolve()
     if "artefacts" in root.parts:
         raise ValueError("Recovery cache must be disposable scratch")
@@ -144,9 +154,12 @@ def prepare_bank(cfg, scenes, inputs, inputs_manifest, foundation_root, manifest
             images = scenes.images(np.arange(n) % len(scenes.names), device)
             phase(images, native(images), PHASES[-1])
 
-        batch, profile = profile_batches(
-            device, (32, 64, 128, cfg["union"]["extract_batch"]), len(scenes.names), probe
-        )
+        if fixed_batch is None:
+            batch, profile = profile_batches(
+                device, (32, 64, 128, cfg["union"]["extract_batch"]), len(scenes.names), probe
+            )
+        else:
+            batch, profile = fixed_batch, []
         schemas = {
             "x": ((4, len(scenes.names), MAX_SLOTS, BASE_DIM), np.float32),
             "xy": ((4, len(scenes.names), MAX_SLOTS, 2), np.float32),
