@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.nn import functional as F
 
@@ -55,9 +56,19 @@ def make_counter(cfg, inputs, root, manifest, device):
 def objective(model, data, queries, idx, cfg):
     c = cfg["count"]
     stats = torch.zeros(3, device=idx.device)
+    local = stats.sum()
     if c["paired"]:
-        before, after, target, stats = data.pair(idx, c["difficulty"], c["attempts"])
-        hist, _ = model(torch.cat((before, after)).contiguous(memory_format=torch.channels_last))
+        localized = c.get("local_weight", 0) > 0
+        batch = data.pair(idx, c["difficulty"], c["attempts"], return_boxes=localized)
+        before, after, target, stats = batch[:4]
+        pixels = torch.cat((before, after)).contiguous(memory_format=torch.channels_last)
+        if localized:
+            kinds = target.argmax(1).repeat(2)
+            hist, _, density = model(pixels, local_types=kinds)
+            old, new = density.chunk(2)
+            local = local_delta_loss(new - old, batch[4], target.sum(1))
+        else:
+            hist, _ = model(pixels)
         original, changed = hist.chunk(2)
         difference = changed - original
         paired = (
@@ -71,7 +82,29 @@ def objective(model, data, queries, idx, cfg):
         )
         paired = zero_loss(original)
     factual, absolute = queries.loss(original, idx)
-    return factual + c["absolute_weight"] * absolute + c["pair_weight"] * paired, stats
+    return factual + c["absolute_weight"] * absolute + c["pair_weight"] * paired + c.get(
+        "local_weight", 0
+    ) * local, stats
+
+
+def local_delta_loss(delta, boxes, accepted):
+    """The known inserted class adds one inside its amodal box and zero outside."""
+    height, width = delta.shape[-2:]
+    x = (torch.arange(width, device=delta.device) + 0.5) / width
+    y = (torch.arange(height, device=delta.device) + 0.5) / height
+    # Any cell overlapping the box is allowed, including sub-cell-width fragments.
+    inside_x = (x[None] + 0.5 / width > boxes[:, :1]) & (
+        x[None] - 0.5 / width < boxes[:, :1] + boxes[:, 2:3]
+    )
+    inside_y = (y[None] + 0.5 / height > boxes[:, 1:2]) & (
+        y[None] - 0.5 / height < boxes[:, 1:2] + boxes[:, 3:4]
+    )
+    inside = inside_y[:, :, None] & inside_x[:, None, :]
+    added = (delta * inside).sum((-2, -1))
+    outside = (delta * ~inside).sum((-2, -1))
+    error = F.smooth_l1_loss(added, accepted, beta=0.15, reduction="none")
+    error += F.smooth_l1_loss(outside, torch.zeros_like(outside), beta=0.15, reduction="none")
+    return (error * accepted).sum() / accepted.sum().clamp_min(1)
 
 
 def train(cfg, model, data, queries, device, steps=None):
@@ -170,24 +203,25 @@ def train(cfg, model, data, queries, device, steps=None):
 
 
 @torch.inference_mode()
-def infer(model, scenes, queries, device, batch):
+def infer(model, scenes, queries, device, batch, save_maps=True):
     model.eval()
     histograms = []
     maps = []
-    progress = Progress("val/count", len(scenes.names), device)
+    progress = Progress(f"{scenes.split}/count", len(scenes.names), device)
     if device.type == "cpu":
         batch = min(batch, 4)
     for first in range(0, len(scenes.names), batch):
         images = scenes.images(np.arange(first, min(first + batch, len(scenes.names))), device)
         hist, mass = model(images)
         histograms.append(hist)
-        maps.append(mass.half().cpu().numpy())
+        if save_maps:
+            maps.append(mass.half().cpu().numpy())
         progress.update(first + len(images))
     hist = torch.cat(histograms)
     score, absolute, counts = queries.score(hist)
     if not np.isfinite(score).all() or not torch.isfinite(hist).all():
         raise FloatingPointError("Non-finite counter predictions")
-    return score, hist.cpu().numpy(), np.concatenate(maps), absolute, counts
+    return score, hist.cpu().numpy(), np.concatenate(maps) if maps else None, absolute, counts
 
 
 def execute(
@@ -227,6 +261,8 @@ def execute(
         raise ValueError("Attach the fixed L2 anchors")
     if cfg["count"]["source"] != "historical" and cfg["count"]["source"] not in manifest["models"]:
         raise ValueError("Unknown counter source")
+    if cfg["count"].get("export_test") and "components_metadata" not in manifest.get("assets", {}):
+        raise ValueError("Attach frozen 057 components for replacement evaluation and export")
     started = time.monotonic()
     with Monitor(device) as monitor:
         prepared = time.monotonic()
@@ -273,7 +309,7 @@ def execute(
         candidate = scores[primary]
         report = dict(
             config=cfg,
-            smoke=bool(limit or steps),
+            smoke=bool(limit or steps or len(train_scenes.names) != 5000 or len(val.names) != 1000),
             device=str(device),
             inputs=input_manifest,
             foundations=manifest,
@@ -299,6 +335,23 @@ def execute(
             validation_csv_sha256=hashlib.sha256((Path(data) / "val.csv").read_bytes()).hexdigest(),
             **monitor.report(),
         )
+        leader = None
+        if "components_metadata" in manifest.get("assets", {}):
+            from .replay import replacement
+
+            old, new, swapped, matched = replacement(
+                val, branch, root, manifest, return_matched=True
+            )
+            leader = dict(control=old, candidate=new, matched054_421=matched)
+            report["leader_replacement"] = dict(
+                control=metrics(val.frame, old),
+                candidate=metrics(val.frame, new),
+                comparison=compare(val.frame, old, new, 0),
+                matched_control=metrics(val.frame, matched),
+                matched_comparison=compare(val.frame, matched, new, 0),
+                swapped_pairs=swapped,
+                scope="Replace the mean054 slot of fixed public 057; other components unchanged",
+            )
     elapsed = time.monotonic() - started
     report.update(
         elapsed_seconds=elapsed,
@@ -317,7 +370,8 @@ def execute(
             model={k: v.cpu() for k, v in model.state_dict().items()},
         ),
     )
-    sink.json("report.json", report)
+    if leader is not None:
+        sink.npz("leader.npz", ids=val.frame.id.to_numpy(), **leader)
     sink.npz("branch.npz", ids=val.frame.id.to_numpy(), score=branch, active=active)
     sink.npz("val.npz", ids=val.frame.id.to_numpy(), score=candidate, reference=baseline)
     sink.npz("blends.npz", ids=val.frame.id.to_numpy(), **scores)
@@ -348,10 +402,44 @@ def execute(
     changes["reference_margin"] = before[selected]
     changes["candidate_margin"] = after[selected]
     sink.write("results", "changes.csv", changes.to_csv(index=False).encode("utf8"))
+    if cfg["count"].get("export_test") and not (limit or steps):
+        from .replay import replacement
+        from .submit import export_csv
+
+        test_started = time.monotonic()
+        val._rgb = None
+        test = Scenes(data, "test")
+        test.prepare_images(scratch / "images", device)
+        queries = CountQueries(test, device)
+        test_branch, test_hist, _, _, _ = infer(
+            model, test, queries, device, cfg["train"]["batch"], save_maps=False
+        )
+        _, test_score, swaps = replacement(test, test_branch, root, manifest)
+        sink.npz("test_branch.npz", ids=test.frame.id.to_numpy(), score=test_branch)
+        sink.npz("test_counts.npz", names=test.names, hist=test_hist)
+        path = run / "candidate.csv"
+        export_csv(
+            test.frame,
+            pd.read_csv(Path(data) / "sample_submission.csv"),
+            test_score,
+            path,
+        )
+        sink.write("results", "candidate.csv", path.read_bytes())
+        report["test_export"] = dict(
+            seconds=time.monotonic() - test_started,
+            rows=len(test.frame),
+            swapped_pairs=swaps,
+            scope="Inference only; no test fitting or selection",
+        )
+        elapsed = time.monotonic() - started
+        report.update(elapsed_seconds=elapsed, within_50_minutes=elapsed <= 3000)
+    sink.json("report.json", report)
     sink.finish(include_weights=False)
     receipt = dict(
         name=name, metrics=report["metrics"], elapsed_seconds=elapsed, smoke=report["smoke"]
     )
+    if "leader_replacement" in report:
+        receipt["leader_metrics"] = report["leader_replacement"]["candidate"]
     (run / "receipt.json").write_text(json.dumps(receipt), encoding="utf8")
     print(json.dumps(receipt), flush=True)
     return report
