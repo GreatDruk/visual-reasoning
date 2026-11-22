@@ -10,7 +10,7 @@ import torch
 from src.config import load_config
 from src.evidence import compose, guarded_swap, transitions
 from src.programs import parse_program
-from src.submit import export_csv, restore_rows
+from src.submit import component_path, counter_dependencies, export_csv, restore_rows
 
 
 def scenes():
@@ -102,3 +102,23 @@ def test_export_aligns_sample_ids_and_rejects_invalid_output(tmp_path):
         export_csv(frame, sample, np.array([np.nan] * 4), path)
     with pytest.raises(ValueError):
         export_csv(frame, sample.iloc[:2], np.zeros(4), path)
+
+
+def test_slim_does_not_require_r50_counter_checkpoints(tmp_path):
+    leader = load_config("configs/057_quality.yaml")
+    slim = load_config("configs/061_slim.yaml")
+    assert counter_dependencies([slim]) == ["count54_421", "count54_853"]
+    assert counter_dependencies([leader]) == [
+        "count53_421",
+        "count53_853",
+        "count54_421",
+        "count54_853",
+    ]
+    full = counter_dependencies([leader])
+    small = counter_dependencies([slim])
+    assert component_path(tmp_path, "val", "count", full) != component_path(
+        tmp_path, "val", "count", small
+    )
+    assert component_path(tmp_path, "val", "visual", full) == component_path(
+        tmp_path, "val", "visual", small
+    )
