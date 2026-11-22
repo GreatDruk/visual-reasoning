@@ -1,0 +1,17 @@
+family: pipeline
+hypothesis: Cold-start reproduction of the fixed 057 architecture; no trained inputs,
+  validation, batch search, epoch selection or cached prediction replay.
+sources: []
+pipeline:
+  submission: 057_quality
+  teacher: {seed: 42, epochs: 19, schedule: 20, batch: 64}
+  native: {seed: 148, epochs: 21, batch: 32, scenes: 2304, rate: 0.002}
+  nativehead: {seed: 42, epochs: 6, batch: 64, rate: 0.002}
+  thaw: {seed: 42, epochs: 10, batch: 128, rate: 0.00018}
+  resnet: {seed: 812, epochs: 21, batch: 128, rate: 0.001}
+  convnext: {config: 044_convnext, seed: 853, epochs: 21, batch: 64}
+  union: {config: 045_union, seeds: [421, 853], epochs: 12, batch: 96}
+  counter: {configs: [053_count, 054_count], seeds: [421, 853], epochs: 18, batch: 96}
+  siglip: {seed: 721, extract_batch: 64, pool_epochs: 4, pool_batch: 384,
+    pool_rate: 0.00012, head_epochs: 10, head_batch: 128, head_rate: 0.002,
+    pca_seed: 732, pool_grid: 8}

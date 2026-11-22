@@ -34,6 +34,10 @@ def load_config(path, stack=()):
     else:
         result = deepcopy(item)
     result["name"] = path.stem
+    if result.get("family") == "pipeline":
+        if set(result) != {"name", "family", "hypothesis", "sources", "pipeline"}:
+            raise ValueError("Unexpected pipeline configuration fields")
+        return result
     if result.get("family") == "submission":
         required = {"name", "family", "hypothesis", "sources", "blend"}
         if set(result) != required:
