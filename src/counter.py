@@ -26,15 +26,31 @@ class DenseCounter(nn.Module):
             nn.init.zeros_(self.joint.weight)
             nn.init.zeros_(self.joint.bias)
 
-    def forward(self, images):
+    def forward(self, images, local_types=None):
         with amp(images.device):
             features = self.net.pyramid(images)[0]
             raw = self.net.head(features)
             correction = self.mass(raw)
             joint = None if self.joint is None else self.joint(features)
-        return self.integrate(
+        hist, mass = self.integrate(
             raw.float(), correction.float(), None if joint is None else joint.float()
         )
+        if local_types is None:
+            return hist, mass
+        if joint is not None:
+            raise ValueError("Localized delta requires factorized density")
+        return hist, mass, self.class_density(raw.float(), mass, local_types)
+
+    @staticmethod
+    def class_density(raw, mass, types):
+        """One selected class per image, without allocating all 96 spatial maps."""
+        selected = mass
+        remaining = types.long()
+        columns = (remaining // 48, remaining // 6 % 8, remaining // 3 % 2, remaining % 3)
+        for logits, column in zip(raw[:, 5:].split((2, 8, 2, 3), 1), columns):
+            index = column[:, None, None, None].expand(-1, 1, *mass.shape[-2:])
+            selected = selected * logits.softmax(1).gather(1, index)[:, 0]
+        return selected
 
     @staticmethod
     def integrate(raw, correction, joint=None):
@@ -74,8 +90,8 @@ class CountQueries:
     def __init__(self, scenes, device):
         supported = (EXACT, MORE, FEWER, SAME, EXIST, NONE)
         by_scene = []
-        for rows in scenes.rows:
-            pairs = scenes.pairs[np.isin(scenes.pairs[:, 0], rows)]
+        for rows, local in zip(scenes.rows, scenes._pairs_local):
+            pairs = rows[local]
             by_scene.append(
                 [
                     pair
