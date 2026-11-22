@@ -4,17 +4,17 @@ Public control: **057_quality — 0.99978**, reported by the team. The current s
 
 ## Run the current study
 
-Update the existing runtime private dataset with `artefacts/kaggle/study.zip`; retain the original base input dataset. Kaggle unpacks ZIP uploads automatically. Open the single `notebooks/base.ipynb`, choose T4 ×2, Internet Off, and Restart & Run All.
+Update the existing runtime private dataset with `artefacts/kaggle/detail.zip`; retain the original base input dataset. Attach only one runtime overlay. Kaggle unpacks ZIP uploads automatically. Open the single `notebooks/base.ipynb`, choose T4 ×2, Internet Off, and Restart & Run All.
 
 Defaults:
 
 ```python
-SELECTED = ["060_count"]
-SEEDS = [853]
-REPLAY = ["057_quality", "062_mixed", "063_consensus"]
+SELECTED = ["064_detail", "065_detail"]
+SEEDS = None
+REPLAY = []
 ```
 
-The quick replay first writes `057_quality.csv`, `062_mixed.csv` and `063_consensus.csv` under `/kaggle/working`, without image encoding or fitting. Set `SELECTED=[]` for only that replay. 061 was slightly worse on public; 058/059 are complete without a useful improvement. Repeat only 060, then inspect its matched 054/853 control. Existing 057 is reproduced from registered frozen components. Live 061 inference also skips both 053 checkpoint networks; a live 057 rerun needs the previous full deployment bundle, while its frozen replay remains available in this study bundle.
+The current study compares native and doubled input resolution using the same train-only 060/421 checkpoint. CNN/FPN weights stay frozen; spatial features are extracted once onto each GPU, then only the existing readout and mass head train. 064 is the native-resolution refit control; 065 changes only the scale. These runs evaluate validation and save weights, without exporting test CSVs. Download the complete Output. Public leader 057 remains unchanged; 061–063 are not recommended for more submissions.
 
 | Config | Single change from 054/057 |
 |---|---|
@@ -24,6 +24,8 @@ The quick replay first writes `057_quality.csv`, `062_mixed.csv` and `063_consen
 | 061_slim | Completed: slightly worse public; retain 057 |
 | 062_mixed | Replace only 054/421 with 060/421, keeping 054/853 |
 | 063_consensus | Require primary confirmation for the existing auxiliary swap |
+| 064_detail | Frozen-feature readout refit at native resolution, initialized from 060/421 |
+| 065_detail | Same as 064 with doubled image and feature-map resolution |
 
 Training uses train only, fixed 18 epochs and effective batch 96, with common decoded RGB and foreground caches. Each completed count run saves `candidate.csv` inside `artefacts/results/<config>/<seed>/<timestamp>`. It replaces the count slot of 057 at weight .25, preserving the other branches. Test is used only for inference/export. Partial smoke runs do not export competition submissions.
 
