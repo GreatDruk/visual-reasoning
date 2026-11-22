@@ -167,7 +167,7 @@ def test_count_queries_use_known_absolute_counts_and_are_antisymmetric(counter_d
     np.testing.assert_array_equal(score, other.score(hist)[0])
 
 
-@pytest.mark.parametrize("config", [f"{n:03d}_count" for n in range(51, 56)])
+@pytest.mark.parametrize("config", [p.stem for p in sorted(Path("configs").glob("*_count.yaml"))])
 def test_every_counter_configuration_runs_full_objective_backward_and_update(counter_data, config):
     scenes, bank, _ = counter_data
     cfg = load_config(Path("configs") / (config + ".yaml"))
@@ -185,3 +185,53 @@ def test_every_counter_configuration_runs_full_objective_backward_and_update(cou
     torch.testing.assert_close(model.net.features[1].running_mean, statistics, rtol=0, atol=0)
     freeze_statistics(model)
     assert not model.net.features[1].training
+
+
+def test_selected_class_density_integrates_to_corresponding_histogram_entry():
+    torch.manual_seed(57)
+    raw = torch.randn(7, 20, 4, 6)
+    hist, mass = DenseCounter.integrate(raw, torch.randn(7, 1, 4, 6))
+    kinds = torch.tensor([0, 95, 48, 17, 23, 41, 82])
+    density = DenseCounter.class_density(raw, mass, kinds)
+    torch.testing.assert_close(density.sum((-2, -1)), hist[torch.arange(7), kinds])
+
+
+def test_local_delta_penalizes_the_right_count_at_the_wrong_location():
+    from src.count_run import local_delta_loss
+
+    boxes = torch.tensor([[0.0, 0.0, 0.25, 0.25]])
+    right = torch.zeros(1, 4, 4, requires_grad=True)
+    wrong = torch.zeros(1, 4, 4, requires_grad=True)
+    with torch.no_grad():
+        right[0, 0, 0] = 1
+        wrong[0, 3, 3] = 1
+    assert right.sum() == wrong.sum()  # Same global +1, different spatial credit.
+    accepted = torch.ones(1)
+    assert local_delta_loss(right, boxes, accepted) == 0
+    loss = local_delta_loss(wrong, boxes, accepted)
+    assert loss > 1
+    loss.backward()
+    assert torch.isfinite(wrong.grad).all() and wrong.grad.abs().sum() > 0
+
+
+def test_local_delta_rejected_insertion_has_no_gradient():
+    from src.count_run import local_delta_loss
+
+    delta = torch.randn(3, 4, 6, requires_grad=True)
+    loss = local_delta_loss(delta, torch.zeros(3, 4), torch.zeros(3))
+    loss.backward()
+    assert loss == 0
+    torch.testing.assert_close(delta.grad, torch.zeros_like(delta))
+
+
+def test_returning_placement_boxes_preserves_sampling_and_rejected_boxes(counter_data):
+    _, bank, _ = counter_data
+    torch.manual_seed(88)
+    first = bank.pair(torch.arange(4))
+    torch.manual_seed(88)
+    second = bank.pair(torch.arange(4), return_boxes=True)
+    for a, b in zip(first, second):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    accepted = second[2].sum(1).bool()
+    assert (second[4][accepted, 2:] > 0).all()
+    assert not second[4][~accepted].any()
