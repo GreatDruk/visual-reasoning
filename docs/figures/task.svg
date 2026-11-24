@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 232" width="840" height="232" role="img" aria-labelledby="title description">
+  <title id="title">Два утверждения об одной 3D-сцене</title>
+  <desc id="description">На условной сцене два красных куба, зелёная сфера и жёлтый цилиндр. Утверждение «Ровно два красных куба» верно. Утверждение «Ровно три красных куба» ложно.</desc>
+  <defs>
+    <linearGradient id="scene" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#fbf8ef"/>
+      <stop offset="1" stop-color="#dfdfc9"/>
+    </linearGradient>
+    <radialGradient id="sphere" cx="32%" cy="26%" r="73%">
+      <stop stop-color="#73d2b7"/>
+      <stop offset="1" stop-color="#16655b"/>
+    </radialGradient>
+    <linearGradient id="cylinder">
+      <stop stop-color="#a87834"/>
+      <stop offset=".45" stop-color="#e8ba65"/>
+      <stop offset="1" stop-color="#a0712d"/>
+    </linearGradient>
+    <g id="cube" stroke-linejoin="round">
+      <path d="M0 16 30 0 62 14 31 30Z" fill="#f48776" stroke="#f48776"/>
+      <path d="M0 16 31 30 31 67 0 53Z" fill="#cc4b44" stroke="#cc4b44"/>
+      <path d="M31 30 62 14 62 50 31 67Z" fill="#9d3631" stroke="#9d3631"/>
+    </g>
+  </defs>
+
+  <rect x="1" y="1" width="838" height="230" rx="16" fill="#f6f8fa" stroke="#d4dbe3" stroke-width="2"/>
+  <g fill="#21303b" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <text x="176" y="34" text-anchor="middle" font-size="20" font-weight="650">Условная 3D-сцена</text>
+    <text x="584" y="34" text-anchor="middle" font-size="20" font-weight="650">Пара утверждений</text>
+
+    <rect x="20" y="49" width="312" height="164" rx="11" fill="url(#scene)" stroke="#dcdcca"/>
+    <g fill="#65725d" opacity=".19">
+      <ellipse cx="108" cy="149" rx="33" ry="9"/>
+      <ellipse cx="244" cy="141" rx="33" ry="8"/>
+      <ellipse cx="260" cy="188" rx="40" ry="10"/>
+      <ellipse cx="154" cy="181" rx="45" ry="11"/>
+    </g>
+    <use href="#cube" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cube" transform="translate(73 92) scale(.82)"/>
+    <path d="M215 83h51v46c0 7-11 12-25.5 12s-25.5-5-25.5-12Z" fill="url(#cylinder)"/>
+    <ellipse cx="240.5" cy="83" rx="25.5" ry="10" fill="#f6d488"/>
+    <circle cx="250" cy="156" r="32" fill="url(#sphere)"/>
+    <use href="#cube" xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cube" transform="translate(112 109) scale(1.08)"/>
+
+    <path d="M350 131h35m-8-8 8 8-8 8" fill="none" stroke="#647789" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="406" y="49" width="414" height="76" rx="11" fill="#eaf5ef" stroke="#c8dfd2"/>
+    <text x="426" y="80" font-size="21" font-weight="630">Ровно два красных куба</text>
+    <text x="426" y="106" font-size="17" font-weight="600" fill="#246246">Верно</text>
+    <path d="m776 87 6 6 12-13" fill="none" stroke="#246246" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="406" y="137" width="414" height="76" rx="11" fill="#fbf0ef" stroke="#edd4d2"/>
+    <text x="426" y="168" font-size="21" font-weight="630">Ровно три красных куба</text>
+    <text x="426" y="194" font-size="17" font-weight="600" fill="#903c36">Ложно</text>
+    <path d="m779 169 12 12m0-12-12 12" fill="none" stroke="#903c36" stroke-width="3" stroke-linecap="round"/>
+  </g>
+</svg>

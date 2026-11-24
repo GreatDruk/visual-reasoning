@@ -1,42 +1,38 @@
-Each image shows a 3D scene with simple objects (cubes, spheres, cylinders; 8 colours, 2 sizes, 2 materials: rubber or metal). Each caption is a statement about the scene that is either TRUE or FALSE for its image. Your task is to predict the probability that a caption is true.
+# Данные Visual Reasoning
 
-### Files
+Каждая строка описывает утверждение о 3D-сцене. На изображении могут быть кубы, сферы и цилиндры восьми цветов, двух размеров и двух материалов (резина и металл). Сцены хранятся как JPEG 240 × 160, утверждения написаны на английском. Задача — предсказать вероятность истинности утверждения на конкретном изображении.
 
--   train/, val/, test/ - images (240x160 JPEG). An image listed in train.csv is in train/, and so on.
--   train.csv, val.csv - captions with labels.
--   test.csv - captions without labels: predict these.
--   sample\_submission.csv - a submission in the correct format (id, label) - (id of sample, prob).
+## Разбиение
 
-| Split | Images | Captions |
-| --- | --- | --- |
-| train | 5,000 |  |
-| val | 1,000 | <…> |
-| test | 6,000 | <…> |
+| Набор | Сцены | Утверждения | Пары |
+| --- | ---: | ---: | ---: |
+| `train` | 5 000 | 29 986 | 14 993 |
+| `val` | 1 000 | 6 000 | 3 000 |
+| `test` | 6 000 | 35 992 | 17 996 |
 
-### Columns
+Сцены в CSV трёх наборов имеют непересекающиеся имена файлов. Каждые два утверждения об одной сцене и категории образуют пару. В размеченных наборах у каждого такого примера одна метка `1` и одна метка `0`. В тесте встречается порядок слов, которого нет в `train` и `val`. Перед разбором текста код сопоставляет разные формулировки одной операции. [Нормализация формулировок](../src/text.py) · [Чтение сцен и сопоставление пар](../src/data.py)
 
--   id - unique row id (used in the submission)
--   image - image file name
--   caption - the statement about the image
--   level - difficulty level of the caption type, 1 (simple) to 5 (compositional)
--   category - caption type (see below)
--   pair\_id - (train/val only) links a caption to its "twin": a caption for the same image that differs in one detail (a colour, a number, left/right, "a"/"no", …). Exactly one caption of each pair is true.
--   label - (train/val only) 1 = the caption is true for the image, 0 = false
+## Файлы и колонки
 
-test.csv has id, image, caption, level, category (no pair\_id, no label).
+- Изображения лежат в `train/`, `val/` и `test/`. Поле `image` в CSV указывает имя файла в соответствующей папке.
+- `train.csv`, `val.csv`, `test.csv` содержат `id` строки, `image`, текст `caption`, уровень сложности `level` (от 1 до 5) и категорию `category`.
+- В `train.csv` и `val.csv` есть ещё `pair_id` и бинарная метка `label`. На `test` модель сопоставляет строки по `image` и `category`.
+- `sample_submission.csv` задаёт порядок `id` и формат `id,label`. В прогнозах `label` — число от 0 до 1. [Экспорт CSV](../src/submit.py)
 
-### Caption categories
+## Категории утверждений
 
-| Level | Category | Example |
-| --- | --- | --- |
-| 1 | attribute | a large red metal cube |
-| 2 | counting | there are exactly three cylinders |
-| 3 | binding | a red cube and a blue sphere |
-| 3 | negation | there is no gray cylinder |
-| 4 | position | the red cube is on the left side of the image |
-| 4 | spatial | a red cube to the left of the blue sphere |
-| 5 | spatial\_counting | there are exactly two objects behind the green sphere |
-| 5 | spatial\_negation | there is no sphere to the right of the red cube |
-| 5 | comparison | there are more cubes than spheres |
+Примеры ниже иллюстрируют типы запросов.
 
-Labels are balanced: 50% true, 50% false in every category. There are some of the test captions use phrasings (word orders) that DO NOT appear in train or val.
+| Уровень | Категория | Пример |
+| ---: | --- | --- |
+| 1 | `attribute` | Есть большой красный металлический куб |
+| 2 | `counting` | Есть ровно три цилиндра |
+| 3 | `binding` | Есть красный куб и синяя сфера |
+| 3 | `negation` | Серого цилиндра нет |
+| 4 | `position` | Красный куб находится в левой части изображения |
+| 4 | `spatial` | Красный куб находится слева от синей сферы |
+| 5 | `spatial_counting` | За зелёной сферой находятся ровно два объекта |
+| 5 | `spatial_negation` | Справа от красного куба нет сфер |
+| 5 | `comparison` | Кубов больше, чем сфер |
+
+Доступ к конкурсным данным предоставляется через Kaggle участникам курса. [Правила соревнования](rules.md) · [Запуск ноутбука](../README.md#запуск-на-kaggle)

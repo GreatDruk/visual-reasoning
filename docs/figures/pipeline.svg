@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 236" width="840" height="236" role="img" aria-labelledby="title description">
+  <title id="title">От сцены и утверждений до вероятностей в CSV</title>
+  <desc id="description">Утверждения проверяют объектные модели и плотный счётчик. Оценки SigLIP берутся из кэша по идентификаторам строк. Логиты трёх веток объединяются с поправками, переводятся в вероятности и записываются в CSV.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+      <path d="m1 1 5.5 3L1 7" fill="none" stroke="#637688" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="838" height="234" rx="16" fill="#f6f8fa" stroke="#d4dbe3" stroke-width="2"/>
+
+  <g fill="none" stroke="#637688" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M218 118h32m0-72v144"/>
+    <path d="M250 46h26" marker-end="url(#arrow)"/>
+    <path d="M250 118h26" marker-end="url(#arrow)"/>
+    <path d="M250 190h26" marker-end="url(#arrow)"/>
+    <path d="M528 46h28v144h-28m0-72h28"/>
+    <path d="M556 82h25" marker-end="url(#arrow)"/>
+    <path d="M703 111v34" marker-end="url(#arrow)"/>
+  </g>
+
+  <g stroke="#cad5df" fill="#fff">
+    <rect x="20" y="89" width="198" height="58" rx="10"/>
+    <rect x="282" y="17" width="246" height="58" rx="10"/>
+    <rect x="282" y="89" width="246" height="58" rx="10"/>
+    <rect x="282" y="161" width="246" height="58" rx="10"/>
+    <rect x="586" y="53" width="234" height="58" rx="10"/>
+    <rect x="586" y="151" width="234" height="58" rx="10" fill="#eaf4ef" stroke="#c6ddd1"/>
+  </g>
+
+  <g fill="#21303b" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="18" font-weight="650">
+    <text x="119" y="114">Изображение</text>
+    <text x="405" y="42">Объектные модели</text>
+    <text x="405" y="114">SigLIP</text>
+    <text x="405" y="186">Плотный счётчик</text>
+    <text x="703" y="78">Смешивание логитов</text>
+    <text x="703" y="176">CSV с вероятностями</text>
+  </g>
+  <g fill="#465b6d" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="15">
+    <text x="119" y="135">и пара утверждений</text>
+    <text x="405" y="63">Разбор и проверка условий</text>
+    <text x="405" y="135">Готовые оценки по id</text>
+    <text x="405" y="207">Оценка числа объектов</text>
+    <text x="703" y="99">Поправки и сигмоида</text>
+    <text x="703" y="197">id, label</text>
+  </g>
+</svg>
